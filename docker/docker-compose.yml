@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  crypto-bot:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: crypto-swarm-bot
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    volumes:
+      - ../logs:/app/logs
+      - ../data:/app/data
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - crypto-bot-network
+
+networks:
+  crypto-bot-network:
+    driver: bridge
+
