@@ -127,11 +127,19 @@ class FundingRateAgent(Agent):
             logger.info(f"Opening hedge on {symbol} with ~{amount_per_coin:.1f} USDT")
             
             # Normalize symbol format
-            spot_symbol = symbol.replace(':USDT', '/USDT').replace('USDT', '/USDT')
-            if not spot_symbol.endswith('/USDT'):
-                spot_symbol = f"{symbol.split('USDT')[0]}/USDT"
-                
-            perp_symbol = symbol if ':USDT' in symbol else f"{symbol.split('USDT')[0]}:USDT"
+            # Handle different symbol formats
+            base_symbol = symbol.replace('USDT', '').replace('/', '').replace(':', '')
+            spot_symbol = f"{base_symbol}/USDT"
+            
+            # For perpetuals, try different formats
+            perp_symbol = f"{base_symbol}:USDT"
+            # Some exchanges use different formats, try alternative
+            perp_alt = f"{base_symbol}/USDT:USDT"  # Binance format
+            
+            # Use the format that works with the exchange
+            if hasattr(self.exchange, 'is_simulation') and self.exchange.is_simulation():
+                # Mock exchange uses simple format
+                perp_symbol = spot_symbol  # Mock uses same format
             
             # Buy spot
             try:

@@ -14,6 +14,7 @@ from core.event_bus import event_bus
 from agents.crypto.crypto_swarm_overseer import CryptoSwarmOverseer, FundingRateAgentWrapper
 from agents.crypto.funding_rate_agent import FundingRateAgent
 from exchanges.bybit_client import BybitExchange
+from exchanges.mock_exchange import MockExchange
 
 logger = logging.getLogger(__name__)
 
@@ -46,28 +47,42 @@ async def main():
         # Initialize exchange clients
         exchanges = []
         
-        if settings.BYBIT_API_KEY and settings.BYBIT_API_SECRET:
-            bybit = BybitExchange(
-                settings.BYBIT_API_KEY,
-                settings.BYBIT_API_SECRET,
-                testnet=settings.BYBIT_TESTNET
+        if settings.PAPER_TRADING:
+            # Use mock exchange for paper trading
+            logger.info("PAPER TRADING MODE ENABLED - Using mock exchange")
+            mock_exchange = MockExchange(
+                starting_balance=settings.SIMULATION_STARTING_BALANCE,
+                fee_rate=settings.SIMULATION_FEES
             )
-            exchanges.append(bybit)
-            logger.info("Bybit exchange client initialized")
+            exchanges.append(mock_exchange)
+            logger.info(f"Mock exchange initialized with ${settings.SIMULATION_STARTING_BALANCE} starting balance")
+        else:
+            # Use real exchanges
+            if settings.BYBIT_API_KEY and settings.BYBIT_API_SECRET:
+                bybit = BybitExchange(
+                    settings.BYBIT_API_KEY,
+                    settings.BYBIT_API_SECRET,
+                    testnet=settings.BYBIT_TESTNET
+                )
+                exchanges.append(bybit)
+                logger.info("Bybit exchange client initialized")
             
         # Create overseer
         overseer = CryptoSwarmOverseer(starting_capital=settings.STARTING_CAPITAL)
         
         # Register strategies
         if exchanges:
-            # Register funding rate agent if Bybit is configured
+            exchange = exchanges[0]
+            # Register funding rate agent
             funding_agent = FundingRateAgent(
-                exchanges[0],
+                exchange,
                 allocation_percent=settings.ALLOCATION_PERCENT
             )
             funding_wrapper = FundingRateAgentWrapper(funding_agent)
             overseer.register_strategy(funding_wrapper)
-            logger.info("Funding rate agent registered")
+            
+            mode_str = "PAPER TRADING" if settings.PAPER_TRADING else "LIVE TRADING"
+            logger.info(f"Funding rate agent registered ({mode_str})")
             
         # Start overseer
         logger.info("Starting overseer...")
@@ -80,6 +95,21 @@ async def main():
             logger.info("Shutdown signal received")
         finally:
             await overseer.stop()
+            
+            # If paper trading, show final stats
+            if settings.PAPER_TRADING and exchanges:
+                mock_exchange = exchanges[0]
+                if hasattr(mock_exchange, 'get_total_value'):
+                    total_value = mock_exchange.get_total_value()
+                    realized_pnl = mock_exchange.get_realized_pnl()
+                    logger.info("=" * 60)
+                    logger.info("PAPER TRADING FINAL STATS")
+                    logger.info("=" * 60)
+                    logger.info(f"Starting Capital: ${settings.SIMULATION_STARTING_BALANCE:,.2f}")
+                    logger.info(f"Total Value: ${total_value:,.2f}")
+                    logger.info(f"Realized P&L: ${realized_pnl:,.2f}")
+                    logger.info(f"Return: {((total_value - settings.SIMULATION_STARTING_BALANCE) / settings.SIMULATION_STARTING_BALANCE * 100):.2f}%")
+                    
             event_bus.stop()
             logger.info("Shutdown complete")
             

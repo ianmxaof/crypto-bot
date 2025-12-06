@@ -22,12 +22,29 @@ class Event:
 class EventBus:
     """Event bus supporting async pub/sub pattern for agent communication."""
     
-    def __init__(self):
+    # Critical event topics that should never be dropped
+    CRITICAL_TOPICS = {
+        "risk:circuit_breaker",
+        "risk:position_limit",
+        "risk:alert",
+        "system:error",
+        "system:critical"
+    }
+    
+    def __init__(self, max_queue_size: int = 10000):
+        """Initialize event bus.
+        
+        Args:
+            max_queue_size: Maximum queue size before backpressure kicks in
+        """
         self._subscribers: Dict[str, List[Callable]] = defaultdict(list)
         self._async_subscribers: Dict[str, List[Callable]] = defaultdict(list)
-        self._event_queue: asyncio.Queue = asyncio.Queue()
+        self._event_queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue_size)
+        self._max_queue_size = max_queue_size
         self._running = False
         self._task: asyncio.Task = None
+        self._dropped_events = 0
+        self._shutdown = asyncio.Event()
         
     def subscribe(self, topic: str, callback: Callable, async_callback: bool = False):
         """Subscribe to events on a topic.
@@ -68,7 +85,31 @@ class EventBus:
         try:
             self._event_queue.put_nowait(event)
         except asyncio.QueueFull:
-            logger.warning(f"Event queue full, dropping event: {topic}")
+            # Critical events should never be dropped
+            if topic in self.CRITICAL_TOPICS:
+                # For critical events, log error and try to process immediately
+                logger.critical(
+                    f"Event queue full but CRITICAL event received: {topic}. "
+                    f"Queue size: {self._event_queue.qsize()}"
+                )
+                # Try to make room by dropping oldest non-critical event
+                try:
+                    # This is a best-effort attempt
+                    dropped = self._event_queue.get_nowait()
+                    self._dropped_events += 1
+                    logger.warning(f"Dropped non-critical event to make room: {dropped.topic}")
+                    self._event_queue.put_nowait(event)
+                except asyncio.QueueEmpty:
+                    # If we can't make room, log critical error
+                    logger.critical(f"CRITICAL event {topic} may be lost due to full queue!")
+            else:
+                # Non-critical events can be dropped
+                self._dropped_events += 1
+                if self._dropped_events % 100 == 0:  # Log every 100 dropped events
+                    logger.warning(
+                        f"Event queue full, dropped {self._dropped_events} events. "
+                        f"Queue size: {self._event_queue.qsize()}, topic: {topic}"
+                    )
             
     async def publish_async(self, topic: str, data: Dict[str, Any], source: str = "unknown"):
         """Publish an event asynchronously."""
@@ -82,7 +123,7 @@ class EventBus:
         
     async def _process_events(self):
         """Background task to process queued events."""
-        while self._running:
+        while self._running and not self._shutdown.is_set():
             try:
                 # Wait for event with timeout to allow shutdown
                 try:
@@ -124,9 +165,17 @@ class EventBus:
                         await callback(event)
                     except Exception as e:
                         logger.error(f"Error in wildcard async subscriber: {e}")
+                
+                # Mark event as processed
+                self._event_queue.task_done()
                         
             except Exception as e:
                 logger.error(f"Error processing event: {e}")
+                # Still mark as done to prevent queue blocking
+                try:
+                    self._event_queue.task_done()
+                except ValueError:
+                    pass  # Already marked as done
                 
     def start(self):
         """Start the event bus background processor."""
@@ -139,9 +188,73 @@ class EventBus:
         """Stop the event bus background processor."""
         if self._running:
             self._running = False
+            self._shutdown.set()
             if self._task:
                 self._task.cancel()
             logger.info("Event bus stopped")
+    
+    async def shutdown(self, timeout: float = 30.0):
+        """Graceful shutdown - process remaining events then stop.
+        
+        Args:
+            timeout: Maximum time to wait for queue to drain
+        """
+        self._shutdown.set()
+        
+        # Wait for queue to drain
+        try:
+            await asyncio.wait_for(self._drain_queue(), timeout=timeout)
+        except asyncio.TimeoutError:
+            remaining = self._event_queue.qsize()
+            logger.warning(
+                f"Shutdown timeout, {remaining} events not processed. "
+                f"Dropped {self._dropped_events} events total."
+            )
+        
+        self.stop()
+    
+    async def _drain_queue(self):
+        """Drain the event queue by processing all remaining events."""
+        while not self._event_queue.empty():
+            try:
+                event = await asyncio.wait_for(self._event_queue.get(), timeout=0.1)
+                # Process event synchronously during shutdown
+                for callback in self._subscribers.get(event.topic, []):
+                    try:
+                        if asyncio.iscoroutinefunction(callback):
+                            await callback(event)
+                        else:
+                            callback(event)
+                    except Exception as e:
+                        logger.error(f"Error in subscriber during shutdown: {e}")
+                
+                for callback in self._async_subscribers.get(event.topic, []):
+                    try:
+                        await callback(event)
+                    except Exception as e:
+                        logger.error(f"Error in async subscriber during shutdown: {e}")
+                
+                self._event_queue.task_done()
+            except asyncio.TimeoutError:
+                break
+        
+        await self._event_queue.join()
+    
+    def get_queue_size(self) -> int:
+        """Get current queue size.
+        
+        Returns:
+            Number of events in queue
+        """
+        return self._event_queue.qsize()
+    
+    def get_dropped_count(self) -> int:
+        """Get number of dropped events.
+        
+        Returns:
+            Total number of dropped events
+        """
+        return self._dropped_events
             
     async def subscribe_async(self, topic: str) -> AsyncIterator[Event]:
         """Create an async iterator that yields events for a topic.

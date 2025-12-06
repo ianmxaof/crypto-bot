@@ -57,6 +57,25 @@ class Settings:
     # Memory/Storage
     MEMORY_DIR: Path = Path(os.getenv("MEMORY_DIR", "data/memory"))
     
+    # Paper Trading / Simulation
+    PAPER_TRADING: bool = os.getenv("PAPER_TRADING", "true").lower() == "true"
+    SIMULATION_MODE: bool = os.getenv("SIMULATION_MODE", "false").lower() == "true"
+    SIMULATION_STARTING_BALANCE: Decimal = Decimal(os.getenv("SIMULATION_STARTING_BALANCE", "10000"))
+    SIMULATION_FEES: Decimal = Decimal(os.getenv("SIMULATION_FEES", "0.001"))  # 0.1% per trade
+    
+    # Risk Controls
+    MAX_POSITION_SIZE_USD: Decimal = Decimal(os.getenv("MAX_POSITION_SIZE_USD", "5000"))
+    MAX_DAILY_LOSS_PERCENT: Decimal = Decimal(os.getenv("MAX_DAILY_LOSS_PERCENT", "5.0"))
+    MAX_DAILY_LOSS_USD: Decimal = Decimal(os.getenv("MAX_DAILY_LOSS_USD", "500"))
+    POSITION_RECONCILIATION_INTERVAL: int = int(os.getenv("POSITION_RECONCILIATION_INTERVAL", "300"))  # seconds
+    
+    # Backtesting
+    HISTORICAL_DATA_DIR: Path = Path(os.getenv("HISTORICAL_DATA_DIR", "data/historical"))
+    
+    # Monitoring
+    ENABLE_ALERTS: bool = os.getenv("ENABLE_ALERTS", "false").lower() == "true"
+    ALERT_EMAIL: Optional[str] = os.getenv("ALERT_EMAIL")
+    
     @classmethod
     def validate(cls) -> bool:
         """Validate that required settings are present.
@@ -72,11 +91,12 @@ class Settings:
             cls.HYPERLIQUID_API_KEY and cls.HYPERLIQUID_API_SECRET,
         ])
         
-        if not exchanges_configured:
+        # If paper trading is enabled, we don't need real exchange credentials
+        if not cls.PAPER_TRADING and not exchanges_configured:
             raise ValueError(
-                "At least one exchange API key/secret must be configured. "
+                "At least one exchange API key/secret must be configured when PAPER_TRADING=false. "
                 "Set BYBIT_API_KEY/SECRET, BINANCE_API_KEY/SECRET, OKX_API_KEY/SECRET, "
-                "or HYPERLIQUID_API_KEY/SECRET"
+                "or HYPERLIQUID_API_KEY/SECRET. Or set PAPER_TRADING=true for simulation mode."
             )
             
         return True

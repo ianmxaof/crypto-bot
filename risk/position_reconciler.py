@@ -1,0 +1,198 @@
+"""Reconcile positions between internal state and exchange."""
+
+import asyncio
+import logging
+from typing import List, Dict, Optional, Callable
+from decimal import Decimal
+from datetime import datetime, timezone
+
+from exchanges.base import BaseExchange, Position
+
+logger = logging.getLogger(__name__)
+
+
+class PositionReconciler:
+    """Reconcile positions between internal tracking and exchange."""
+    
+    def __init__(self, tolerance_percent: Decimal = Decimal('0.01'),
+                 reconciliation_interval: int = 30):
+        """Initialize position reconciler.
+        
+        Args:
+            tolerance_percent: Tolerance for position differences (0.01 = 1%)
+            reconciliation_interval: Seconds between automatic reconciliations
+        """
+        self.tolerance_percent = tolerance_percent
+        self.reconciliation_interval = reconciliation_interval
+        self._running = False
+        self._task: Optional[asyncio.Task] = None
+        self._desync_callbacks: List[Callable] = []
+        self._last_reconciliation: Optional[datetime] = None
+        self._reconciliation_count = 0
+        self._desync_count = 0
+        
+    async def reconcile(self, exchange: BaseExchange,
+                       internal_positions: List[Position]) -> Dict:
+        """Reconcile positions.
+        
+        Args:
+            exchange: Exchange to reconcile with
+            internal_positions: Internally tracked positions
+            
+        Returns:
+            Dictionary with reconciliation results
+        """
+        try:
+            # Fetch positions from exchange
+            exchange_positions = await exchange.fetch_positions()
+            
+            # Build position maps
+            internal_map = {pos.symbol: pos for pos in internal_positions}
+            exchange_map = {pos.symbol: pos for pos in exchange_positions}
+            
+            mismatches = []
+            missing_internal = []
+            missing_exchange = []
+            
+            # Check all symbols
+            all_symbols = set(internal_map.keys()) | set(exchange_map.keys())
+            
+            for symbol in all_symbols:
+                internal_pos = internal_map.get(symbol)
+                exchange_pos = exchange_map.get(symbol)
+                
+                if internal_pos and not exchange_pos:
+                    missing_exchange.append(symbol)
+                elif exchange_pos and not internal_pos:
+                    missing_internal.append(symbol)
+                elif internal_pos and exchange_pos:
+                    # Check if sizes match
+                    size_diff = abs(internal_pos.size - exchange_pos.size)
+                    if size_diff > self.tolerance_percent * internal_pos.size:
+                        mismatches.append({
+                            "symbol": symbol,
+                            "internal_size": float(internal_pos.size),
+                            "exchange_size": float(exchange_pos.size),
+                            "difference": float(size_diff)
+                        })
+                        
+            result = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "match": len(mismatches) == 0 and len(missing_internal) == 0 and len(missing_exchange) == 0,
+                "mismatches": mismatches,
+                "missing_internal": missing_internal,
+                "missing_exchange": missing_exchange
+            }
+            
+            if not result["match"]:
+                logger.warning(f"Position mismatch detected: {result}")
+                
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error during position reconciliation: {e}", exc_info=True)
+            return {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "match": False,
+                "error": str(e),
+                "mismatches": [],
+                "missing_internal": [],
+                "missing_exchange": []
+            }
+    
+    def register_desync_callback(self, callback: Callable):
+        """Register callback for desync events.
+        
+        Args:
+            callback: Async function(symbol, internal_pos, exchange_pos) -> None
+        """
+        self._desync_callbacks.append(callback)
+    
+    async def start_periodic_reconciliation(self, exchange: BaseExchange,
+                                           get_internal_positions: Callable[[], List[Position]]):
+        """Start periodic reconciliation task.
+        
+        Args:
+            exchange: Exchange to reconcile with
+            get_internal_positions: Function that returns current internal positions
+        """
+        if self._running:
+            logger.warning("Periodic reconciliation already running")
+            return
+        
+        self._running = True
+        self._task = asyncio.create_task(
+            self._reconciliation_loop(exchange, get_internal_positions)
+        )
+        logger.info(f"Started periodic reconciliation (interval: {self.reconciliation_interval}s)")
+    
+    async def stop_periodic_reconciliation(self):
+        """Stop periodic reconciliation task."""
+        if not self._running:
+            return
+        
+        self._running = False
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        logger.info("Stopped periodic reconciliation")
+    
+    async def _reconciliation_loop(self, exchange: BaseExchange,
+                                  get_internal_positions: Callable[[], List[Position]]):
+        """Background task for periodic reconciliation."""
+        while self._running:
+            try:
+                await asyncio.sleep(self.reconciliation_interval)
+                
+                if not self._running:
+                    break
+                
+                internal_positions = get_internal_positions()
+                result = await self.reconcile(exchange, internal_positions)
+                
+                self._last_reconciliation = datetime.now(timezone.utc)
+                self._reconciliation_count += 1
+                
+                if not result["match"]:
+                    self._desync_count += 1
+                    logger.warning(
+                        f"Position desync detected (reconciliation #{self._reconciliation_count}): "
+                        f"{len(result['mismatches'])} mismatches, "
+                        f"{len(result['missing_internal'])} missing internal, "
+                        f"{len(result['missing_exchange'])} missing exchange"
+                    )
+                    
+                    # Notify callbacks
+                    for callback in self._desync_callbacks:
+                        try:
+                            if asyncio.iscoroutinefunction(callback):
+                                await callback(result)
+                            else:
+                                callback(result)
+                        except Exception as e:
+                            logger.error(f"Desync callback failed: {e}")
+                else:
+                    logger.debug(f"Position reconciliation passed (#{self._reconciliation_count})")
+                    
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in reconciliation loop: {e}", exc_info=True)
+                await asyncio.sleep(5)  # Wait before retry
+    
+    def get_stats(self) -> Dict:
+        """Get reconciliation statistics.
+        
+        Returns:
+            Dictionary with reconciliation stats
+        """
+        return {
+            "reconciliation_count": self._reconciliation_count,
+            "desync_count": self._desync_count,
+            "last_reconciliation": self._last_reconciliation.isoformat() if self._last_reconciliation else None,
+            "running": self._running
+        }
+
