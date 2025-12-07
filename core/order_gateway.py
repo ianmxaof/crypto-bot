@@ -162,6 +162,9 @@ class OrderGateway:
                 audit.add_error(f"Circuit breaker blocked order: {error_msg}")
                 audit.update_state(OrderState.REJECTED)
                 self._audit_trails[client_order_id] = audit
+                # Persist audit trail before raising error
+                if self.order_persistence:
+                    self.order_persistence.save_order(audit)
                 raise OrderGatewayError(f"Circuit breaker blocked order: {error_msg}")
             
             # Check if symbol has pending verification order
@@ -170,6 +173,9 @@ class OrderGateway:
                 audit.add_error(f"Symbol {symbol} has pending verification order: {pending_order_id}")
                 audit.update_state(OrderState.REJECTED)
                 self._audit_trails[client_order_id] = audit
+                # Persist audit trail before raising error
+                if self.order_persistence:
+                    self.order_persistence.save_order(audit)
                 raise OrderGatewayError(f"Symbol {symbol} has pending verification order: {pending_order_id}")
             
             # STEP 2: Symbol lock acquisition
@@ -206,6 +212,9 @@ class OrderGateway:
                                 audit.add_error(f"Insufficient balance: available={available}, required={estimated_cost}")
                                 audit.update_state(OrderState.REJECTED)
                                 self._audit_trails[client_order_id] = audit
+                                # Persist audit trail before raising error (critical for recovery)
+                                if self.order_persistence:
+                                    self.order_persistence.save_order(audit)
                                 raise OrderGatewayError(f"Insufficient {currency} balance: available={available}")
                             
                             balance_reserved = True
@@ -217,7 +226,10 @@ class OrderGateway:
                                 audit.add_error(f"Validation failed: {validation.message}")
                                 audit.update_state(OrderState.REJECTED)
                                 self._audit_trails[client_order_id] = audit
+                                # Persist audit trail before raising error (critical for recovery)
                                 # Balance will be released automatically by context manager
+                                if self.order_persistence:
+                                    self.order_persistence.save_order(audit)
                                 raise OrderGatewayError(f"Order validation failed: {validation.message}")
                             
                             # STEP 5: Idempotency check
@@ -295,12 +307,21 @@ class OrderGateway:
                                     "timestamp": datetime.now(timezone.utc).isoformat()
                                 }, source="order_gateway")
                                 
+                                # Persist audit trail before raising error (CRITICAL for recovery)
+                                self._audit_trails[client_order_id] = audit
+                                if self.order_persistence:
+                                    self.order_persistence.save_order(audit)
+                                
                                 raise OrderGatewayError(f"Order submission timeout for {symbol}. Order may have executed. Status: PENDING_VERIFICATION")
                             
                             except Exception as e:
                                 audit.add_error(f"Exchange submission failed: {str(e)}")
                                 audit.update_state(OrderState.REJECTED)
                                 # Balance will be released by context manager
+                                # Persist audit trail before raising error (critical for recovery)
+                                self._audit_trails[client_order_id] = audit
+                                if self.order_persistence:
+                                    self.order_persistence.save_order(audit)
                                 raise OrderGatewayError(f"Exchange submission failed: {str(e)}")
                     
                     elif side == "sell":
@@ -313,6 +334,9 @@ class OrderGateway:
                             audit.add_error(f"Validation failed: {validation.message}")
                             audit.update_state(OrderState.REJECTED)
                             self._audit_trails[client_order_id] = audit
+                            # Persist audit trail before raising error (critical for recovery)
+                            if self.order_persistence:
+                                self.order_persistence.save_order(audit)
                             raise OrderGatewayError(f"Order validation failed: {validation.message}")
                         
                         # STEP 5: Idempotency check
@@ -364,11 +388,20 @@ class OrderGateway:
                                 "timestamp": datetime.now(timezone.utc).isoformat()
                             }, source="order_gateway")
                             
+                            # Persist audit trail before raising error (CRITICAL for recovery)
+                            self._audit_trails[client_order_id] = audit
+                            if self.order_persistence:
+                                self.order_persistence.save_order(audit)
+                            
                             raise OrderGatewayError(f"Order submission timeout for {symbol}. Order may have executed. Status: PENDING_VERIFICATION")
                         
                         except Exception as e:
                             audit.add_error(f"Exchange submission failed: {str(e)}")
                             audit.update_state(OrderState.REJECTED)
+                            # Persist audit trail before raising error (critical for recovery)
+                            self._audit_trails[client_order_id] = audit
+                            if self.order_persistence:
+                                self.order_persistence.save_order(audit)
                             raise OrderGatewayError(f"Exchange submission failed: {str(e)}")
                     
                     # Store audit trail
@@ -384,10 +417,18 @@ class OrderGateway:
                 audit.add_error(f"Symbol lock failed: {str(e)}")
                 audit.update_state(OrderState.REJECTED)
                 self._audit_trails[client_order_id] = audit
+                # Persist audit trail before raising error (critical for recovery)
+                if self.order_persistence:
+                    self.order_persistence.save_order(audit)
                 raise OrderGatewayError(f"Symbol lock failed: {str(e)}")
         
         except OrderGatewayError:
-            # Already logged in audit trail
+            # OrderGatewayError may have already persisted audit trail, but ensure it's persisted
+            # Some paths may have raised before persistence was added
+            if client_order_id in self._audit_trails and self.order_persistence:
+                # Double-check persistence (idempotent operation)
+                audit = self._audit_trails[client_order_id]
+                self.order_persistence.save_order(audit)
             raise
         except Exception as e:
             audit.add_error(f"Unexpected error: {str(e)}")

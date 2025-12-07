@@ -214,11 +214,21 @@ class PositionReconciler:
             difference = abs(internal_size - exchange_size)
             
             # Check if difference exceeds tolerance
-            if internal_size > 0:
-                diff_percent = difference / internal_size
+            # Handle all cases: positive, zero, and negative (short) positions
+            if abs(internal_size) > Decimal('0.0001'):  # Use absolute value for short positions
+                # Use absolute value to handle both long and short positions
+                diff_percent = difference / abs(internal_size)
                 if diff_percent > self.tolerance_percent:
                     within_tolerance = False
                     break
+            elif abs(exchange_size) > Decimal('0.0001'):
+                # Internal is zero/close to zero but exchange has position - this is a mismatch
+                within_tolerance = False
+                break
+            elif abs(difference) > Decimal('0.0001'):
+                # Both are close to zero but difference is significant - mismatch
+                within_tolerance = False
+                break
         
         if within_tolerance:
             # Within tolerance: Auto-sync internal state to exchange state
