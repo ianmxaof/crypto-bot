@@ -37,6 +37,57 @@ st.title("🤖 Agent Performance")
 agent_perf_df = data_service.get_agent_performance()
 pnl_df = data_service.get_pnl_data(limit=data_limit)
 
+# Agent Roster
+st.subheader("📋 Agent Roster")
+try:
+    # Get agents from simulation state or memory
+    from config.simulation_state import read_simulation_state
+    sim_state = read_simulation_state()
+    
+    # Default agent list (can be enhanced to read from actual overseer)
+    default_agents = ['Funding Rate', 'MEV Hunter', 'Hyperliquid LP']
+    
+    # Create agent roster table
+    if not agent_perf_df.empty:
+        # Use actual agent data
+        roster_data = []
+        for _, row in agent_perf_df.iterrows():
+            agent_name = row['agent']
+            status = "Active" if sim_state.get('running', False) else "Idle"
+            pnl = row['total_pnl']
+            trades = int(row['trade_count'])
+            roster_data.append({
+                "Agent": agent_name,
+                "Status": status,
+                "PnL": f"${pnl:,.2f}",
+                "Trades": trades
+            })
+        roster_df = pd.DataFrame(roster_data)
+    else:
+        # Use default agents with placeholder data
+        roster_data = []
+        for agent in default_agents:
+            status = "Active" if sim_state.get('running', False) else "Idle"
+            roster_data.append({
+                "Agent": agent,
+                "Status": status,
+                "PnL": "$0.00",
+                "Trades": 0
+            })
+        roster_df = pd.DataFrame(roster_data)
+    
+    st.dataframe(roster_df, use_container_width=True, hide_index=True)
+    
+    # Marketplace stub (future enhancement)
+    with st.expander("🔮 Agent Marketplace (Coming Soon)", expanded=False):
+        st.info("Upload and share custom agents. Leaderboard sorting by sim PnL coming soon!")
+        st.button("Upload Agent", disabled=True, help="Feature coming soon")
+        
+except Exception as e:
+    st.warning(f"Could not load agent roster: {e}")
+
+st.divider()
+
 if not agent_perf_df.empty:
     # Agent performance breakdown
     col1, col2 = st.columns([1, 1])

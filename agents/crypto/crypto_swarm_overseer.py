@@ -18,7 +18,11 @@ try:
     from config.simulation_state import (
         get_simulation_running,
         get_simulation_speed,
-        get_simulation_days
+        get_simulation_days,
+        increment_cycle_count,
+        update_simulation_state,
+        get_elapsed_sim_days,
+        get_cycle_count
     )
 except ImportError:
     # Fallback if simulation_state module isn't available
@@ -26,6 +30,10 @@ except ImportError:
     def get_simulation_running(): return False
     def get_simulation_speed(): return 100.0
     def get_simulation_days(): return 30
+    def increment_cycle_count(): return False
+    def update_simulation_state(**kwargs): return False
+    def get_elapsed_sim_days(): return 0.0
+    def get_cycle_count(): return 0
 
 # Polling interval for simulation state (seconds)
 # Polling every 3 seconds gives <0.1% CPU overhead and instant control
@@ -119,6 +127,8 @@ class CryptoSwarmOverseer(Agent):
             persist_path=settings.MEMORY_DIR / "crypto_pnl.json"
         )
         self.last_logged_balance = starting_capital  # Track for PnL delta calculation
+        self.simulation_start_time: Optional[datetime] = None  # Track simulation start for day calculation
+        self.exchanges: List = []  # Store exchange references for price updates
         
     def register_strategy(self, strategy: StrategyAgent):
         """Register a strategy agent.
@@ -159,9 +169,13 @@ class CryptoSwarmOverseer(Agent):
                 if is_running != last_running_state:
                     if is_running:
                         simulation_start_time = datetime.now(timezone.utc)
+                        self.simulation_start_time = simulation_start_time
+                        # Reset elapsed time when starting
+                        update_simulation_state(elapsed_sim_days=0.0, cycle_count=0, current_phase="running")
                         logger.info(f"Simulation STARTED - Speed: {speed}x, Target: {target_days} days")
                     else:
                         logger.info("Simulation STOPPED")
+                        update_simulation_state(current_phase="idle")
                     last_running_state = is_running
                 
                 # Check if simulation should be running
@@ -220,6 +234,16 @@ class CryptoSwarmOverseer(Agent):
         logger.info("CryptoSwarmOverseer cycle starting...")
         
         try:
+            # Update prices from real market data if using mock exchange
+            # This allows live price updates during simulation
+            if hasattr(self, 'exchanges') and self.exchanges:
+                for exchange in self.exchanges:
+                    if hasattr(exchange, 'update_prices_from_real_data'):
+                        try:
+                            await exchange.update_prices_from_real_data()
+                        except Exception as e:
+                            logger.debug(f"Could not update prices from real data: {e}")
+            
             # Refresh market state
             state = await self.refresh_market_state()
             
@@ -272,6 +296,30 @@ class CryptoSwarmOverseer(Agent):
             peak = max(float(self.starting_capital), current_balance)
             drawdown = ((peak - current_balance) / peak * 100) if peak > 0 else 0.0
             
+            # Calculate simulation day and cycle count
+            simulation_day = 0.0
+            cycle_count = 0
+            try:
+                # Get elapsed simulation days from state
+                simulation_day = get_elapsed_sim_days()
+                cycle_count = get_cycle_count()
+                
+                # Increment cycle count for this cycle
+                increment_cycle_count()
+                cycle_count += 1  # Use incremented value for logging
+                
+                # Calculate elapsed simulated days based on real time and speed
+                if self.simulation_start_time:
+                    elapsed_real = (datetime.now(timezone.utc) - self.simulation_start_time).total_seconds()
+                    speed = get_simulation_speed()
+                    # Each cycle represents 6 hours (0.25 days) of simulation time
+                    elapsed_sim_days = (elapsed_real * speed) / (24 * 3600)
+                    # Update state with calculated elapsed days
+                    update_simulation_state(elapsed_sim_days=elapsed_sim_days)
+                    simulation_day = elapsed_sim_days
+            except Exception as e:
+                logger.warning(f"Error calculating simulation progress: {e}")
+            
             # Record cycle with comprehensive logging for dashboard
             self.memory.append({
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -285,7 +333,9 @@ class CryptoSwarmOverseer(Agent):
                 "drawdown": drawdown,
                 "total_capital": current_balance,
                 "deployed": float(allocated),
-                "top_strategy_yields": [float(y) for y, _ in bids[:3]]
+                "top_strategy_yields": [float(y) for y, _ in bids[:3]],
+                "simulation_day": simulation_day,
+                "cycle_count": cycle_count
             })
             
             # Update last logged balance for next cycle

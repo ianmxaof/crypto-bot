@@ -22,6 +22,16 @@ except ImportError:
     MARKET_DATA_AVAILABLE = False
     MarketDataProvider = None
 
+# Memory logging for dashboard
+try:
+    from core.memory.chrono import ChronologicalMemory
+    from config.settings import settings
+    from config.simulation_state import get_elapsed_sim_days, get_cycle_count
+    MEMORY_LOGGING_AVAILABLE = True
+except ImportError:
+    MEMORY_LOGGING_AVAILABLE = False
+    ChronologicalMemory = None
+
 
 class MockExchange(BaseExchange):
     """Mock exchange for paper trading - simulates all operations without real API calls."""
@@ -52,6 +62,17 @@ class MockExchange(BaseExchange):
         
         # Track orders by client order ID for idempotent submission
         self._client_order_map: Dict[str, Order] = {}
+        
+        # Memory logging for dashboard
+        self.memory = None
+        if MEMORY_LOGGING_AVAILABLE:
+            try:
+                self.memory = ChronologicalMemory(
+                    namespace="crypto_pnl",
+                    persist_path=settings.MEMORY_DIR / "crypto_pnl.json"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to initialize memory logging: {e}")
         
         # Market data integration
         self.use_real_data = use_real_data and MARKET_DATA_AVAILABLE
@@ -200,6 +221,57 @@ class MockExchange(BaseExchange):
         self._client_order_map[client_order_id] = order
         self.state.add_order(order)
         logger.info(f"Mock order executed: {side} {amount} {symbol} @ {execution_price} (client_id: {client_order_id})")
+        
+        # Log trade to memory for dashboard
+        if self.memory:
+            try:
+                # Get current balance
+                current_balance = await self._atomic_balance.get_balance("USDT")
+                total_value = self.get_total_value()
+                
+                # Calculate PnL for this trade
+                trade_pnl = 0.0
+                realized_pnl = 0.0
+                if side == "sell":
+                    # For sell orders, calculate realized PnL
+                    position = self.state.position_tracker.get_position(symbol)
+                    if position:
+                        entry_price = position.entry_price
+                        realized_pnl = float(self.pnl_calculator.calculate_realized_pnl(
+                            entry_price, execution_price, amount, position.side
+                        ))
+                        trade_pnl = realized_pnl
+                # For buy orders, PnL is unrealized (0 for now)
+                
+                # Get simulation progress
+                simulation_day = 0.0
+                cycle_count = 0
+                if MEMORY_LOGGING_AVAILABLE:
+                    try:
+                        simulation_day = get_elapsed_sim_days()
+                        cycle_count = get_cycle_count()
+                    except Exception:
+                        pass
+                
+                # Log trade
+                self.memory.append({
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "pnl": trade_pnl,
+                    "balance": float(current_balance),
+                    "total_value": float(total_value),
+                    "agent": "mock_exchange",
+                    "symbol": symbol,
+                    "side": side,
+                    "amount": float(amount),
+                    "price": float(execution_price),
+                    "order_id": order_id,
+                    "client_order_id": client_order_id,
+                    "simulation_day": simulation_day,
+                    "cycle_count": cycle_count,
+                    "realized_pnl": realized_pnl
+                })
+            except Exception as e:
+                logger.warning(f"Failed to log trade to memory: {e}")
         
         return order
         
@@ -352,16 +424,39 @@ class MockExchange(BaseExchange):
         """Update prices from real market data provider (if enabled).
         
         Call this periodically during simulation to use live prices.
+        Reads selected market from simulation state.
         """
         if not self.use_real_data or not self.market_data_provider:
             return
         
         try:
-            for symbol in self.state.current_prices.keys():
+            # Get selected market from simulation state
+            selected_market = None
+            try:
+                from config.simulation_state import get_selected_market
+                selected_market = get_selected_market()
+            except Exception:
+                pass
+            
+            # If market is selected, update that market's price
+            if selected_market:
+                # Convert market symbol format (BTCUSDT -> BTC/USDT)
+                if 'USDT' in selected_market:
+                    symbol = selected_market.replace('USDT', '/USDT')
+                else:
+                    symbol = f"{selected_market}/USDT"
+                
                 price = await self.market_data_provider.get_current_price(symbol)
                 if price:
                     self.state.update_price(symbol, price)
-                    logger.debug(f"Updated {symbol} price to ${price}")
+                    logger.debug(f"Updated {symbol} price to ${price} from live market data")
+            else:
+                # Fallback: update all prices
+                for symbol in self.state.current_prices.keys():
+                    price = await self.market_data_provider.get_current_price(symbol)
+                    if price:
+                        self.state.update_price(symbol, price)
+                        logger.debug(f"Updated {symbol} price to ${price}")
         except Exception as e:
             logger.warning(f"Error updating prices from real data: {e}")
     

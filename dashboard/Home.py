@@ -11,6 +11,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from dashboard.data_service import DashboardDataService
 from dashboard.config import UPDATE_INTERVALS, DEFAULT_UPDATE_INTERVAL, MAX_DATA_POINTS
 from config.settings import settings
+from config.simulation_state import read_simulation_state
+from datetime import datetime, timezone
 
 # Page configuration
 st.set_page_config(
@@ -58,6 +60,30 @@ data_limit = st.sidebar.slider(
 
 # Store data_limit in session state so pages can access it
 st.session_state['data_limit'] = data_limit
+
+# Initialize session state for cross-tab data sharing
+if 'logs' not in st.session_state:
+    st.session_state['logs'] = []
+if 'last_update' not in st.session_state:
+    st.session_state['last_update'] = None
+if 'simulation_state' not in st.session_state:
+    st.session_state['simulation_state'] = {}
+
+# Update shared data in session state
+try:
+    # Update logs from memory
+    pnl_data = data_service.get_pnl_data(limit=1000)
+    st.session_state['logs'] = pnl_data.to_dict('records') if not pnl_data.empty else []
+    
+    # Update simulation state
+    sim_state = read_simulation_state()
+    st.session_state['simulation_state'] = sim_state
+    
+    # Update last update timestamp
+    st.session_state['last_update'] = datetime.now(timezone.utc).isoformat()
+except Exception as e:
+    # If update fails, keep existing session state
+    pass
 
 # Auto-refresh logic
 if auto_refresh and UPDATE_INTERVALS[update_interval] > 0:

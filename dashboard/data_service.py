@@ -39,12 +39,31 @@ class DashboardDataService:
         self._cache: Dict[str, Any] = {}
         self._cache_time: Dict[str, datetime] = {}
         self._cache_ttl = timedelta(seconds=2)  # Cache for 2 seconds
+        self._last_sim_state_hash: Optional[str] = None  # Track simulation state changes
     
     def _is_cache_valid(self, key: str) -> bool:
         """Check if cached data is still valid."""
         if key not in self._cache_time:
             return False
-        return datetime.now(timezone.utc) - self._cache_time[key] < self._cache_ttl
+        
+        # Check TTL
+        if datetime.now(timezone.utc) - self._cache_time[key] >= self._cache_ttl:
+            return False
+        
+        # Check if simulation state changed (invalidate cache on state changes)
+        try:
+            current_state = read_simulation_state()
+            # Create a simple hash of state for comparison
+            state_hash = str(current_state.get('running', False)) + str(current_state.get('last_updated', ''))
+            if self._last_sim_state_hash is not None and state_hash != self._last_sim_state_hash:
+                # State changed, invalidate cache
+                self._last_sim_state_hash = state_hash
+                return False
+            self._last_sim_state_hash = state_hash
+        except Exception:
+            pass
+        
+        return True
     
     def _get_cached(self, key: str) -> Optional[Any]:
         """Get cached data if valid."""
@@ -363,4 +382,67 @@ class DashboardDataService:
         self._cache.clear()
         self._cache_time.clear()
         logger.debug("Dashboard cache cleared")
+    
+    def get_recent_events(self, limit: int = 100, topic: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get recent events from event bus.
+        
+        Args:
+            limit: Maximum number of events to retrieve
+            topic: Optional topic filter (None for all topics)
+            
+        Returns:
+            List of event dictionaries
+        """
+        cache_key = f"events_{limit}_{topic or 'all'}"
+        if self._is_cache_valid(cache_key):
+            return self._get_cached(cache_key)
+        
+        try:
+            from core.event_bus import event_bus
+            events = event_bus.get_recent_events(count=limit, topic=topic)
+            self._set_cache(cache_key, events)
+            return events
+        except Exception as e:
+            logger.warning(f"Error fetching events: {e}")
+            return []
+    
+    def get_event_statistics(self) -> Dict[str, Any]:
+        """Get event bus statistics.
+        
+        Returns:
+            Dictionary with event statistics
+        """
+        cache_key = "event_stats"
+        if self._is_cache_valid(cache_key):
+            return self._get_cached(cache_key)
+        
+        try:
+            from core.event_bus import event_bus
+            stats = {
+                "queue_size": event_bus.get_queue_size(),
+                "dropped_events": event_bus.get_dropped_count(),
+                "max_queue_size": event_bus._max_queue_size
+            }
+            
+            # Get event counts by topic
+            events = event_bus.get_recent_events(count=1000)
+            topic_counts = {}
+            for event in events:
+                topic = event.get("topic", "unknown")
+                topic_counts[topic] = topic_counts.get(topic, 0) + 1
+            
+            stats["events_by_topic"] = topic_counts
+            stats["total_events"] = len(events)
+            
+            self._set_cache(cache_key, stats)
+            return stats
+        except Exception as e:
+            logger.warning(f"Error fetching event statistics: {e}")
+            return {
+                "queue_size": 0,
+                "dropped_events": 0,
+                "max_queue_size": 10000,
+                "events_by_topic": {},
+                "total_events": 0
+            }
 

@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from typing import Dict, List, Callable, Any, AsyncIterator
+from typing import Dict, List, Callable, Any, AsyncIterator, Optional
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -31,11 +31,12 @@ class EventBus:
         "system:critical"
     }
     
-    def __init__(self, max_queue_size: int = 10000):
+    def __init__(self, max_queue_size: int = 10000, max_event_history: int = 1000):
         """Initialize event bus.
         
         Args:
             max_queue_size: Maximum queue size before backpressure kicks in
+            max_event_history: Maximum number of events to keep in history for dashboard
         """
         self._subscribers: Dict[str, List[Callable]] = defaultdict(list)
         self._async_subscribers: Dict[str, List[Callable]] = defaultdict(list)
@@ -45,6 +46,10 @@ class EventBus:
         self._task: asyncio.Task = None
         self._dropped_events = 0
         self._shutdown = asyncio.Event()
+        # Event history for dashboard access
+        self._event_history: List[Event] = []
+        self._max_event_history = max_event_history
+        self._history_lock = asyncio.Lock()
         
     def subscribe(self, topic: str, callback: Callable, async_callback: bool = False):
         """Subscribe to events on a topic.
@@ -166,6 +171,13 @@ class EventBus:
                     except Exception as e:
                         logger.error(f"Error in wildcard async subscriber: {e}")
                 
+                # Store event in history for dashboard access
+                async with self._history_lock:
+                    self._event_history.append(event)
+                    # Trim history if too large
+                    if len(self._event_history) > self._max_event_history:
+                        self._event_history = self._event_history[-self._max_event_history:]
+                
                 # Mark event as processed
                 self._event_queue.task_done()
                         
@@ -255,6 +267,63 @@ class EventBus:
             Total number of dropped events
         """
         return self._dropped_events
+    
+    def get_recent_events(self, count: int = 100, topic: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get recent events for dashboard access.
+        
+        Args:
+            count: Number of recent events to retrieve
+            topic: Optional topic filter (None for all topics)
+            
+        Returns:
+            List of event dictionaries with topic, data, timestamp, source
+        """
+        async def _get_events():
+            async with self._history_lock:
+                events = self._event_history.copy()
+            
+            # Filter by topic if specified
+            if topic:
+                events = [e for e in events if e.topic == topic]
+            
+            # Get most recent events
+            recent = events[-count:] if len(events) > count else events
+            
+            # Convert to dictionaries
+            return [
+                {
+                    "topic": event.topic,
+                    "data": event.data,
+                    "timestamp": event.timestamp,
+                    "source": event.source
+                }
+                for event in recent
+            ]
+        
+        # Run async function synchronously for dashboard
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If loop is running, we need to use a different approach
+                # For now, return a copy of history (may be slightly stale)
+                events = self._event_history.copy()
+                if topic:
+                    events = [e for e in events if e.topic == topic]
+                recent = events[-count:] if len(events) > count else events
+                return [
+                    {
+                        "topic": event.topic,
+                        "data": event.data,
+                        "timestamp": event.timestamp,
+                        "source": event.source
+                    }
+                    for event in recent
+                ]
+            else:
+                return loop.run_until_complete(_get_events())
+        except RuntimeError:
+            # No event loop, return empty list
+            return []
             
     async def subscribe_async(self, topic: str) -> AsyncIterator[Event]:
         """Create an async iterator that yields events for a topic.

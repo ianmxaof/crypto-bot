@@ -70,6 +70,9 @@ async def main():
         # Create overseer
         overseer = CryptoSwarmOverseer(starting_capital=settings.STARTING_CAPITAL)
         
+        # Store exchange references for price updates
+        overseer.exchanges = exchanges
+        
         # Register strategies
         if exchanges:
             exchange = exchanges[0]

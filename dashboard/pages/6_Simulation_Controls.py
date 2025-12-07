@@ -18,8 +18,26 @@ from config.simulation_state import (
     get_simulation_running,
     get_simulation_speed,
     get_simulation_days,
-    get_starting_capital
+    get_starting_capital,
+    get_progress_percentage,
+    get_elapsed_sim_days,
+    get_cycle_count,
+    get_current_phase
 )
+
+# Import market functions with fallback
+try:
+    from config.simulation_state import get_selected_market, set_selected_market
+except ImportError:
+    # Fallback if functions don't exist (shouldn't happen, but handle gracefully)
+    def get_selected_market() -> str:
+        state = read_simulation_state()
+        return state.get("selected_market", "BTCUSDT")
+    
+    def set_selected_market(market: str) -> bool:
+        if not market or not isinstance(market, str):
+            return False
+        return update_simulation_state(selected_market=market)
 
 # Page configuration
 st.set_page_config(
@@ -73,6 +91,27 @@ with st.sidebar:
         step=100,
         help="Initial capital for the simulation"
     )
+    
+    # Market selection
+    st.divider()
+    st.subheader("Live Market Selection")
+    markets = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'PEPEUSDT', 'WIFUSDT', 'BONKUSDT', 'DOGEUSDT']
+    current_market = get_selected_market()
+    selected_market = st.selectbox(
+        "Live Market",
+        markets,
+        index=markets.index(current_market) if current_market in markets else 0,
+        help="Select market for live price data during simulation"
+    )
+    
+    if st.button("Apply Market", use_container_width=True):
+        if set_selected_market(selected_market):
+            st.success(f"Switched to {selected_market} — sim now uses live prices")
+            st.rerun()
+        else:
+            st.error("Failed to update market selection")
+    
+    st.divider()
     
     if st.button("Apply Settings", type="primary", use_container_width=True):
         success = update_simulation_state(
@@ -158,52 +197,83 @@ with st.expander("📋 Live Simulation Checklist", expanded=True):
         summary = data_service.get_pnl_summary()
         pnl_df = data_service.get_pnl_data(limit=100)
         
+        # Get simulation state metrics
+        progress_pct = get_progress_percentage()
+        elapsed_days = get_elapsed_sim_days()
+        cycle_count = get_cycle_count()
+        current_phase = get_current_phase()
+        target_days = current_state.get('days', 30)
+        speed = current_state.get('speed', 100)
+        allocation_pct = current_state.get('allocation_pct', 0.0)
+        
         # Check initialization
-        init_status = "✅ Done" if is_running or not pnl_df.empty else "⏳ Waiting..."
+        if current_phase in ["idle", "initializing"]:
+            init_status = "⏳ Initializing..."
+        elif current_phase in ["allocating", "running"]:
+            init_status = "✅ Complete"
+        else:
+            init_status = "✅ Done" if is_running or not pnl_df.empty else "⏳ Waiting..."
         
         # Check allocation (has data means allocation happened)
-        alloc_status = "✅ Done" if not pnl_df.empty else "⏳ Waiting..."
+        if not pnl_df.empty:
+            alloc_status = f"✅ Running (Kelly: {allocation_pct:.1%} deployed)" if allocation_pct > 0 else "✅ Done"
+        elif is_running:
+            alloc_status = "🔄 Allocating..."
+        else:
+            alloc_status = "⏳ Waiting..."
         
         # Calculate cycles/days progress
-        progress_pct = 0.0
-        cycle_status = "⏸️ Stopped"
-        if not pnl_df.empty and is_running:
-            cycle_count = len(pnl_df)
-            target_days = current_state.get('days', 30)
-            # Estimate: each cycle is roughly 6 hours = 0.25 days
-            estimated_days = cycle_count * 0.25
-            progress_pct = min(100, (estimated_days / target_days * 100) if target_days > 0 else 0)
-            cycle_status = f"🔄 {cycle_count} cycles | ~{estimated_days:.1f}/{target_days} days ({progress_pct:.0f}%)"
+        if is_running and cycle_count > 0:
+            cycle_status = f"🔄 {cycle_count} cycles | {elapsed_days:.2f}/{target_days} days ({progress_pct:.0f}%)"
         elif is_running:
             cycle_status = "🔄 Starting..."
+        else:
+            cycle_status = "⏸️ Stopped"
         
-        # Risk check (simplified - would need actual risk data)
-        risk_status = "🟢 All green" if is_running else "⏸️ N/A"
+        # Risk check - get from data service
+        risk_metrics = data_service.get_risk_metrics()
+        max_dd = risk_metrics.get('max_drawdown_pct', 0.0)
+        current_dd = risk_metrics.get('current_drawdown_pct', 0.0)
+        if abs(current_dd) > 10 or abs(max_dd) > 15:
+            risk_status = f"⚠️ Breached (Max DD: {max_dd:.1f}%)"
+        elif is_running:
+            risk_status = f"🟢 All green (Max DD: {max_dd:.1f}%)"
+        else:
+            risk_status = "⏸️ N/A"
+        
+        # Progress with real-time elapsed
+        elapsed_real_time = 0.0
+        if current_state.get("start_time"):
+            try:
+                start_ts = datetime.fromisoformat(current_state["start_time"].replace('Z', '+00:00'))
+                elapsed_real_time = (datetime.now(timezone.utc) - start_ts).total_seconds()
+            except:
+                pass
         
         # Completion status
-        if is_running:
-            last_updated = current_state.get("last_updated")
-            if last_updated:
-                try:
-                    last_ts = datetime.fromisoformat(last_updated.replace('Z', '+00:00'))
-                    elapsed = (datetime.now(timezone.utc) - last_ts).total_seconds() / 3600
-                    if elapsed > 24:  # No update in 24 hours
-                        complete_status = "⚠️ Stalled (no updates)"
-                    else:
-                        complete_status = "❌ Not yet"
-                except:
-                    complete_status = "❌ Not yet"
+        if progress_pct >= 100:
+            complete_status = "✅ Done"
+        elif is_running:
+            if current_phase == "complete":
+                complete_status = "✅ Complete"
+            elif elapsed_real_time > 0 and cycle_count == 0:
+                complete_status = "⚠️ Stalled (no cycles)"
             else:
-                complete_status = "❌ Not yet"
+                complete_status = "⏳ In Progress"
         else:
             complete_status = "⏸️ Not started"
         
         st.markdown(f"""
-        1. **Initialization:** {init_status}  
-        2. **Capital Allocation:** {alloc_status}  
-        3. **Agent Cycles:** {cycle_status}  
-        4. **Risk Check:** {risk_status}  
-        5. **Progress:** {progress_pct:.0f}% complete (estimated)  
+        1. **Initialization:** {init_status} ({len(pnl_df)} logs loaded)
+        
+        2. **Capital Allocation:** {alloc_status}
+        
+        3. **Agent Cycles:** {cycle_status}
+        
+        4. **Risk Check:** {risk_status}
+        
+        5. **Progress:** {progress_pct:.0f}% complete (Elapsed: {elapsed_real_time:.0f}s real-time)
+        
         6. **Complete:** {complete_status}
         """)
         

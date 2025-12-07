@@ -12,6 +12,13 @@ from dashboard.components import (
     plot_drawdown, display_metrics_table
 )
 from dashboard.config import MAX_DATA_POINTS
+from config.runtime_risks import (
+    read_runtime_risks,
+    update_runtime_risks,
+    get_max_position_size,
+    get_max_daily_loss_percent,
+    get_max_drawdown_percent
+)
 
 # Page configuration
 st.set_page_config(
@@ -46,6 +53,60 @@ with col2:
     st.metric("Max Daily Loss %", f"{risk_metrics['max_daily_loss_percent']:.1f}%")
 with col3:
     st.metric("Max Daily Loss USD", f"${risk_metrics['max_daily_loss_usd']:,.2f}")
+
+st.divider()
+
+# Editable Risk Controls
+st.subheader("⚙️ Edit Risk Limits")
+st.info("💡 Update risk limits in real-time. Changes take effect on the next simulation cycle.")
+
+runtime_risks = read_runtime_risks()
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    max_pos = st.number_input(
+        "Max Position Size ($)",
+        value=int(runtime_risks.get('max_position_size_usd', 5000)),
+        min_value=100,
+        max_value=100000,
+        step=100,
+        help="Maximum position size per trade in USD"
+    )
+
+with col2:
+    max_loss_pct = st.number_input(
+        "Max Daily Loss (%)",
+        value=float(runtime_risks.get('max_daily_loss_percent', 5.0)),
+        min_value=0.1,
+        max_value=50.0,
+        step=0.5,
+        format="%.1f",
+        help="Maximum daily loss percentage before circuit breaker"
+    )
+
+with col3:
+    max_dd_pct = st.number_input(
+        "Max Drawdown (%)",
+        value=float(runtime_risks.get('max_drawdown_percent', 15.0)),
+        min_value=1.0,
+        max_value=50.0,
+        step=0.5,
+        format="%.1f",
+        help="Maximum drawdown percentage before trading halt"
+    )
+
+if st.button("Update Risks", type="primary", use_container_width=True):
+    success = update_runtime_risks(
+        max_position_size_usd=float(max_pos),
+        max_daily_loss_percent=float(max_loss_pct),
+        max_drawdown_percent=float(max_dd_pct)
+    )
+    if success:
+        st.success("✅ Risks updated — next sim cycle applies")
+        st.rerun()
+    else:
+        st.error("❌ Failed to update risks. Check logs for details.")
 
 st.divider()
 

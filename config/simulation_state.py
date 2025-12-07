@@ -32,7 +32,9 @@ DEFAULT_STATE = {
     "elapsed_real_seconds": 0.0,  # Real-time elapsed
     "elapsed_sim_days": 0.0,  # Simulated days elapsed
     "cycle_count": 0,  # Number of cycles completed
-    "current_phase": "idle"  # idle, initializing, allocating, running, complete
+    "current_phase": "idle",  # idle, initializing, allocating, running, complete
+    "selected_market": "BTCUSDT",  # Selected market for live price data
+    "allocation_pct": 0.0  # Current allocation percentage
 }
 
 
@@ -241,7 +243,8 @@ def update_simulation_state(**kwargs) -> bool:
     
     # Validate and update allowed keys only
     allowed_keys = {"running", "speed", "days", "starting_capital", "start_time", 
-                   "elapsed_real_seconds", "elapsed_sim_days", "cycle_count", "current_phase"}
+                   "elapsed_real_seconds", "elapsed_sim_days", "cycle_count", "current_phase",
+                   "selected_market", "allocation_pct"}
     for key, value in kwargs.items():
         if key in allowed_keys:
             if key == "speed" and value <= 0:
@@ -328,4 +331,30 @@ def increment_cycle_count() -> bool:
     state = read_simulation_state()
     current_count = state.get("cycle_count", 0)
     return update_simulation_state(cycle_count=current_count + 1)
+
+
+def get_selected_market() -> str:
+    """Get selected market for live price data.
+    
+    Returns:
+        Selected market symbol (e.g., "BTCUSDT")
+    """
+    state = read_simulation_state()
+    return state.get("selected_market", "BTCUSDT")
+
+
+def set_selected_market(market: str) -> bool:
+    """Set selected market for live price data.
+    
+    Args:
+        market: Market symbol (e.g., "BTCUSDT", "ETHUSDT")
+        
+    Returns:
+        True if successful
+    """
+    if not market or not isinstance(market, str):
+        logger.error(f"Invalid market: {market}. Must be a non-empty string.")
+        return False
+    
+    return update_simulation_state(selected_market=market)
 
