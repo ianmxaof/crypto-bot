@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from typing import List, Dict, Optional, Callable
+from typing import List, Dict, Optional, Callable, Any
 from decimal import Decimal
 from datetime import datetime, timezone
 
@@ -161,34 +161,34 @@ class PositionReconciler:
                 self._last_reconciliation = datetime.now(timezone.utc)
                 self._reconciliation_count += 1
                 
-            if not result["match"]:
-                self._desync_count += 1
-                self._consecutive_mismatches += 1
-                
-                logger.warning(
-                    f"Position desync detected (reconciliation #{self._reconciliation_count}): "
-                    f"{len(result['mismatches'])} mismatches, "
-                    f"{len(result['missing_internal'])} missing internal, "
-                    f"{len(result['missing_exchange'])} missing exchange, "
-                    f"consecutive mismatches: {self._consecutive_mismatches}"
-                )
-                
-                # Auto-correction logic
-                await self._handle_mismatch(result, exchange, internal_positions)
-                
-                # Notify callbacks
-                for callback in self._desync_callbacks:
-                    try:
-                        if asyncio.iscoroutinefunction(callback):
-                            await callback(result)
-                        else:
-                            callback(result)
-                    except Exception as e:
-                        logger.error(f"Desync callback failed: {e}")
-            else:
-                # Reset consecutive mismatch counter on success
-                self._consecutive_mismatches = 0
-                logger.debug(f"Position reconciliation passed (#{self._reconciliation_count})")
+                if not result["match"]:
+                    self._desync_count += 1
+                    self._consecutive_mismatches += 1
+                    
+                    logger.warning(
+                        f"Position desync detected (reconciliation #{self._reconciliation_count}): "
+                        f"{len(result['mismatches'])} mismatches, "
+                        f"{len(result['missing_internal'])} missing internal, "
+                        f"{len(result['missing_exchange'])} missing exchange, "
+                        f"consecutive mismatches: {self._consecutive_mismatches}"
+                    )
+                    
+                    # Auto-correction logic
+                    await self._handle_mismatch(result, exchange, internal_positions)
+                    
+                    # Notify callbacks
+                    for callback in self._desync_callbacks:
+                        try:
+                            if asyncio.iscoroutinefunction(callback):
+                                await callback(result)
+                            else:
+                                callback(result)
+                        except Exception as e:
+                            logger.error(f"Desync callback failed: {e}")
+                else:
+                    # Reset consecutive mismatch counter on success
+                    self._consecutive_mismatches = 0
+                    logger.debug(f"Position reconciliation passed (#{self._reconciliation_count})")
                     
             except asyncio.CancelledError:
                 break
@@ -283,7 +283,8 @@ class PositionReconciler:
             # transition to OPEN immediately (per Opus 4.5 spec)
             from risk.circuit_breaker import CircuitBreakerState
             if self.circuit_breaker.state == CircuitBreakerState.DRAINING:
-                self.circuit_breaker.state = CircuitBreakerState.OPEN
+                # Use _update_state() to ensure state is persisted to disk
+                self.circuit_breaker._update_state(CircuitBreakerState.OPEN)
                 logger.critical("Circuit breaker transitioned from DRAINING to OPEN due to reconciliation mismatch")
     
     def get_stats(self) -> Dict:

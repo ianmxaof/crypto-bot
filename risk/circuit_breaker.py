@@ -225,9 +225,11 @@ class CircuitBreaker:
             
     def reset(self):
         """Manually reset circuit breaker."""
-        self.state = CircuitBreakerState.CLOSED
+        self._update_state(CircuitBreakerState.CLOSED)
         self.last_trigger_time = None
         self._in_flight_orders.clear()
+        # Save state after clearing in-flight orders
+        self._save_state()
         logger.info("Circuit breaker manually reset")
     
     def get_in_flight_count(self) -> int:
