@@ -110,6 +110,25 @@ class HyperliquidExchange(BaseExchange):
         except Exception as e:
             logger.error(f"Error fetching Hyperliquid order: {e}")
             raise ExchangeError(f"Failed to fetch order: {e}") from e
+    
+    async def fetch_order_by_client_id(self, client_order_id: str, symbol: str) -> Optional[Order]:
+        """Fetch order by client order ID (for idempotent submission).
+        
+        Args:
+            client_order_id: Client order ID
+            symbol: Trading pair symbol
+        
+        Returns:
+            Order if found, None otherwise
+        """
+        try:
+            # Hyperliquid may support client order IDs in their API
+            # For now, return None as placeholder
+            logger.warning("Hyperliquid fetch_order_by_client_id not fully implemented")
+            return None
+        except Exception as e:
+            logger.debug(f"Order with client_order_id {client_order_id} not found: {e}")
+            return None
             
     async def fetch_funding_rates(self, symbols: Optional[List[str]] = None) -> Dict[str, FundingRate]:
         """Fetch funding rates for perpetuals."""

@@ -1,7 +1,9 @@
 """Circuit breaker to halt trading on excessive losses."""
 
+import json
 import logging
 import asyncio
+from pathlib import Path
 from decimal import Decimal
 from datetime import datetime, timezone
 from typing import Optional, Set
@@ -23,22 +25,29 @@ class CircuitBreaker:
     
     def __init__(self, loss_threshold_percent: Decimal = Decimal('0.10'),
                  loss_threshold_usd: Optional[Decimal] = None,
-                 cooldown_seconds: int = 3600):
+                 cooldown_seconds: int = 3600,
+                 persistence_path: Optional[Path] = None):
         """Initialize circuit breaker.
         
         Args:
             loss_threshold_percent: Loss threshold as percentage (0.10 = 10%)
             loss_threshold_usd: Loss threshold in USD (if None, only uses percentage)
             cooldown_seconds: Seconds to wait before attempting recovery
+            persistence_path: Optional path to persist circuit breaker state
         """
         self.loss_threshold_percent = loss_threshold_percent
         self.loss_threshold_usd = loss_threshold_usd
         self.cooldown_seconds = cooldown_seconds
+        self.persistence_path = persistence_path
         self.state = CircuitBreakerState.CLOSED
         self.last_trigger_time: Optional[datetime] = None
         self.initial_capital: Optional[Decimal] = None
         self._in_flight_orders: Set[str] = set()  # Track in-flight order IDs
         self._lock = asyncio.Lock()
+        
+        # Load state from persistence if path provided
+        if self.persistence_path:
+            self._load_state()
         
     def set_initial_capital(self, capital: Decimal):
         """Set initial capital for percentage calculations.
@@ -62,7 +71,7 @@ class CircuitBreaker:
             if self.state == CircuitBreakerState.DRAINING:
                 # If no in-flight orders, transition to OPEN
                 if len(self._in_flight_orders) == 0:
-                    self.state = CircuitBreakerState.OPEN
+                    self._update_state(CircuitBreakerState.OPEN)
                     logger.info("Circuit breaker DRAINING complete - now OPEN")
                 else:
                     # Still draining - allow existing orders but block new ones
@@ -74,7 +83,7 @@ class CircuitBreaker:
                 if self.last_trigger_time:
                     elapsed = (datetime.now(timezone.utc) - self.last_trigger_time).total_seconds()
                     if elapsed >= self.cooldown_seconds:
-                        self.state = CircuitBreakerState.HALF_OPEN
+                        self._update_state(CircuitBreakerState.HALF_OPEN)
                         logger.warning("Circuit breaker entering HALF_OPEN state - testing recovery")
                     else:
                         return False, "Circuit breaker is OPEN - trading halted"
@@ -96,7 +105,7 @@ class CircuitBreaker:
                     
             # If half-open and check passes, close circuit breaker
             if self.state == CircuitBreakerState.HALF_OPEN:
-                self.state = CircuitBreakerState.CLOSED
+                self._update_state(CircuitBreakerState.CLOSED)
                 logger.info("Circuit breaker CLOSED - trading resumed")
                 
             return True, None
@@ -154,16 +163,17 @@ class CircuitBreaker:
             if self.state not in (CircuitBreakerState.OPEN, CircuitBreakerState.DRAINING):
                 # If there are in-flight orders, enter DRAINING state first
                 if len(self._in_flight_orders) > 0:
-                    self.state = CircuitBreakerState.DRAINING
+                    self._update_state(CircuitBreakerState.DRAINING)
                     logger.critical(
                         f"Circuit breaker TRIGGERED (DRAINING): {reason} - "
                         f"{len(self._in_flight_orders)} in-flight orders"
                     )
                 else:
-                    self.state = CircuitBreakerState.OPEN
+                    self._update_state(CircuitBreakerState.OPEN)
                     logger.critical(f"Circuit breaker TRIGGERED: {reason}")
                 
                 self.last_trigger_time = datetime.now(timezone.utc)
+                self._save_state()
     
     def register_order(self, order_id: str):
         """Register an in-flight order.
@@ -185,7 +195,7 @@ class CircuitBreaker:
         
         # If we're draining and no more orders, transition to OPEN
         if self.state == CircuitBreakerState.DRAINING and len(self._in_flight_orders) == 0:
-            self.state = CircuitBreakerState.OPEN
+            self._update_state(CircuitBreakerState.OPEN)
             logger.info("Circuit breaker DRAINING complete - now OPEN")
     
     async def wait_for_drain(self, timeout: float = 300.0) -> bool:
@@ -227,4 +237,78 @@ class CircuitBreaker:
             Number of in-flight orders
         """
         return len(self._in_flight_orders)
+    
+    def _save_state(self):
+        """Save circuit breaker state to disk."""
+        if not self.persistence_path:
+            return
+        
+        try:
+            state_data = {
+                "state": self.state.value,
+                "last_trigger_time": self.last_trigger_time.isoformat() if self.last_trigger_time else None,
+                "initial_capital": str(self.initial_capital) if self.initial_capital else None,
+                "in_flight_orders": list(self._in_flight_orders)
+            }
+            
+            self.persistence_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.persistence_path, 'w') as f:
+                json.dump(state_data, f, indent=2)
+            
+            logger.debug(f"Circuit breaker state saved: {self.state.value}")
+        except Exception as e:
+            logger.error(f"Error saving circuit breaker state: {e}")
+    
+    def _load_state(self):
+        """Load circuit breaker state from disk.
+        
+        If state is OPEN, stay OPEN (do not auto-recover).
+        """
+        if not self.persistence_path or not self.persistence_path.exists():
+            return
+        
+        try:
+            with open(self.persistence_path, 'r') as f:
+                state_data = json.load(f)
+            
+            # Load state
+            state_str = state_data.get("state", "CLOSED")
+            try:
+                self.state = CircuitBreakerState(state_str)
+            except ValueError:
+                logger.warning(f"Invalid circuit breaker state: {state_str}, using CLOSED")
+                self.state = CircuitBreakerState.CLOSED
+            
+            # Load last trigger time
+            if state_data.get("last_trigger_time"):
+                self.last_trigger_time = datetime.fromisoformat(state_data["last_trigger_time"])
+            
+            # Load initial capital
+            if state_data.get("initial_capital"):
+                self.initial_capital = Decimal(str(state_data["initial_capital"]))
+            
+            # Load in-flight orders
+            self._in_flight_orders = set(state_data.get("in_flight_orders", []))
+            
+            logger.info(f"Circuit breaker state loaded: {self.state.value}")
+            
+            # Critical: If OPEN, stay OPEN (do not auto-recover)
+            if self.state == CircuitBreakerState.OPEN:
+                logger.critical(
+                    "Circuit breaker state is OPEN - trading will remain halted. "
+                    "Manual reset required."
+                )
+        except Exception as e:
+            logger.error(f"Error loading circuit breaker state: {e}")
+            # Default to CLOSED on error (safe default)
+            self.state = CircuitBreakerState.CLOSED
+    
+    def _update_state(self, new_state: CircuitBreakerState):
+        """Update state and persist.
+        
+        Args:
+            new_state: New circuit breaker state
+        """
+        self.state = new_state
+        self._save_state()
 

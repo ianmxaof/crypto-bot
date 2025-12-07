@@ -4,6 +4,7 @@ import ccxt.pro as ccxtpro
 import asyncio
 import logging
 from typing import Dict, List, Optional, Any
+from .base import BaseExchange, Balance, Position, Order, FundingRate, ExchangeError
 from decimal import Decimal
 from datetime import datetime, timezone
 
@@ -132,6 +133,29 @@ class BybitExchange(BaseExchange):
         except Exception as e:
             logger.error(f"Error fetching Bybit order: {e}")
             raise ExchangeError(f"Failed to fetch order: {e}") from e
+    
+    async def fetch_order_by_client_id(self, client_order_id: str, symbol: str) -> Optional[Order]:
+        """Fetch order by client order ID (for idempotent submission).
+        
+        Args:
+            client_order_id: Client order ID
+            symbol: Trading pair symbol
+        
+        Returns:
+            Order if found, None otherwise
+        """
+        try:
+            # Bybit supports clientOrderId parameter
+            # Try to fetch order using clientOrderId
+            params = {'clientOrderId': client_order_id}
+            order_data = await self.client.fetch_order(None, symbol, params=params)
+            if order_data:
+                return self._parse_order(order_data)
+            return None
+        except Exception as e:
+            # Order not found or not supported
+            logger.debug(f"Order with client_order_id {client_order_id} not found: {e}")
+            return None
             
     async def fetch_funding_rates(self, symbols: Optional[List[str]] = None) -> Dict[str, FundingRate]:
         """Fetch funding rates for perpetuals."""

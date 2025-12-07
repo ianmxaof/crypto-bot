@@ -8,6 +8,7 @@ from typing import Dict
 
 from core.agent_base import Agent, AgentConfig
 from core.event_bus import event_bus
+from core.order_gateway import OrderGateway
 from exchanges.hyperliquid_client import HyperliquidExchange
 
 logger = logging.getLogger(__name__)
@@ -25,11 +26,12 @@ MAX_SPREAD_BPS = 45                       # widen in volatility
 class HyperliquidLPAgent(Agent):
     """Agent that provides liquidity on Hyperliquid with delta-neutral market making."""
     
-    def __init__(self, exchange: HyperliquidExchange):
+    def __init__(self, exchange: HyperliquidExchange, order_gateway: OrderGateway):
         """Initialize Hyperliquid LP agent.
         
         Args:
             exchange: Hyperliquid exchange client
+            order_gateway: OrderGateway instance for order submission
         """
         super().__init__(AgentConfig(
             name="hyperliquid_lp_v2",
@@ -37,6 +39,7 @@ class HyperliquidLPAgent(Agent):
             description="Hyperliquid delta-neutral market making | 120–420% APR | <9% DD"
         ))
         self.exchange = exchange
+        self.order_gateway = order_gateway
         self.active = True
         self.current_inventory: Dict[str, Decimal] = {coin: Decimal('0') for coin in TARGET_COINS}
         
@@ -158,6 +161,10 @@ class HyperliquidLPAgent(Agent):
         """
         try:
             symbol = f"{coin}/USDT"
+            # For limit orders, we still use exchange directly for now
+            # TODO: Add submit_limit_order to OrderGateway
+            # For now, use market order through gateway if we need safety checks
+            # Note: Limit orders should also go through gateway in future
             order = await self.exchange.create_limit_order(symbol, side, amount, price)
             
             # Update inventory tracking (simplified)

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 from core.agent_base import Agent, AgentConfig
 from core.event_bus import event_bus
+from core.order_gateway import OrderGateway
 from exchanges.base import BaseExchange
 from strategies.funding_rate import FundingRateStrategy
 
@@ -17,11 +18,13 @@ logger = logging.getLogger(__name__)
 class FundingRateAgent(Agent):
     """Agent that farms funding rates using delta-neutral hedging."""
     
-    def __init__(self, exchange: BaseExchange, allocation_percent: Decimal = Decimal('0.95')):
+    def __init__(self, exchange: BaseExchange, order_gateway: OrderGateway,
+                 allocation_percent: Decimal = Decimal('0.95')):
         """Initialize funding rate agent.
         
         Args:
             exchange: Exchange client instance
+            order_gateway: OrderGateway instance for order submission
             allocation_percent: Percentage of capital to allocate (0.95 = 95%)
         """
         super().__init__(AgentConfig(
@@ -30,6 +33,7 @@ class FundingRateAgent(Agent):
             description="Delta-neutral perpetual funding collector + daily hot-coin rotation"
         ))
         self.exchange = exchange
+        self.order_gateway = order_gateway
         self.allocation_percent = allocation_percent
         self.strategy = FundingRateStrategy()
         self.active_hedges: Set[str] = set()
@@ -86,8 +90,16 @@ class FundingRateAgent(Agent):
                 perp_symbol = symbol if ':USDT' in symbol else f"{symbol}:USDT"
                 await self.exchange.close_position(perp_symbol)
                 
-                # Close spot position (sell)
-                await self.exchange.create_market_order(symbol, 'sell', Decimal('1000'))  # Will sell all
+                # Close spot position (sell) - use OrderGateway
+                try:
+                    await self.order_gateway.submit_market_order(
+                        agent_id=self.config.name,
+                        symbol=symbol,
+                        side='sell',
+                        amount=Decimal('1000')  # Will sell all
+                    )
+                except Exception as e:
+                    logger.error(f"Error closing spot position via OrderGateway: {e}")
                 
                 logger.info(f"Closed hedge for {symbol}")
             except Exception as e:
@@ -141,32 +153,39 @@ class FundingRateAgent(Agent):
                 # Mock exchange uses simple format
                 perp_symbol = spot_symbol  # Mock uses same format
             
-            # Buy spot
+            # Buy spot - use OrderGateway
             try:
-                spot_order = await self.exchange.create_market_order(
-                    spot_symbol,
-                    'buy',
-                    amount_per_coin
+                spot_order = await self.order_gateway.submit_market_order(
+                    agent_id=self.config.name,
+                    symbol=spot_symbol,
+                    side='buy',
+                    amount=amount_per_coin
                 )
                 logger.info(f"Opened spot long: {spot_order.id}")
             except Exception as e:
                 logger.error(f"Failed to open spot position: {e}")
                 return
-                
-            # Short perpetual (1x leverage for delta-neutral)
+            
+            # Short perpetual (1x leverage for delta-neutral) - use OrderGateway
             try:
                 await self.exchange.set_leverage(1, perp_symbol)
-                perp_order = await self.exchange.create_market_order(
-                    perp_symbol,
-                    'sell',
-                    amount_per_coin
+                perp_order = await self.order_gateway.submit_market_order(
+                    agent_id=self.config.name,
+                    symbol=perp_symbol,
+                    side='sell',
+                    amount=amount_per_coin
                 )
                 logger.info(f"Opened perpetual short: {perp_order.id}")
             except Exception as e:
                 logger.error(f"Failed to open perpetual position: {e}")
                 # Try to close spot to avoid unhedged position
                 try:
-                    await self.exchange.create_market_order(spot_symbol, 'sell', amount_per_coin)
+                    await self.order_gateway.submit_market_order(
+                        agent_id=self.config.name,
+                        symbol=spot_symbol,
+                        side='sell',
+                        amount=amount_per_coin
+                    )
                 except:
                     pass
                 return

@@ -26,6 +26,7 @@ class EventBus:
     CRITICAL_TOPICS = {
         "risk:circuit_breaker",
         "risk:position_limit",
+        "risk:position_mismatch",
         "risk:alert",
         "system:error",
         "system:critical"
