@@ -12,6 +12,27 @@ from core.memory.chrono import ChronologicalMemory
 
 logger = logging.getLogger(__name__)
 
+# Import simulation state for runtime control
+try:
+    from config.simulation_state import (
+        get_simulation_running,
+        get_simulation_speed,
+        get_simulation_days
+    )
+except ImportError:
+    # Fallback if simulation_state module isn't available
+    logger.warning("simulation_state module not available, simulation controls disabled")
+    def get_simulation_running(): return False
+    def get_simulation_speed(): return 100.0
+    def get_simulation_days(): return 30
+
+# Polling interval for simulation state (seconds)
+# Polling every 3 seconds gives <0.1% CPU overhead and instant control
+SIMULATION_STATE_POLL_INTERVAL = 3.0
+
+# Base cycle interval (6 hours in seconds)
+BASE_CYCLE_INTERVAL = 6 * 3600  # 21600 seconds
+
 
 class StrategyAgent(Agent):
     """Base class for all strategy agents that can request capital."""
@@ -102,16 +123,90 @@ class CryptoSwarmOverseer(Agent):
         logger.info(f"Registered strategy: {strategy.config.name}")
         
     async def run(self):
-        """Main overseer loop."""
+        """Main overseer loop with simulation control support."""
         logger.info("CryptoSwarmOverseer started")
         
-        # First run immediately
-        await self.run_allocation_cycle()
+        # Track simulation start time for duration control
+        simulation_start_time: Optional[datetime] = None
+        last_running_state = False
         
-        # Then every 6 hours
+        # First run immediately (if simulation is running)
+        try:
+            if get_simulation_running():
+                await self.run_allocation_cycle()
+                simulation_start_time = datetime.now(timezone.utc)
+                last_running_state = True
+                logger.info("Initial allocation cycle completed (simulation running)")
+        except Exception as e:
+            logger.warning(f"Error checking initial simulation state: {e}")
+        
+        # Main loop with simulation control polling
         while not self._shutdown_event.is_set():
-            await asyncio.sleep(6 * 3600)  # 6 hours
-            await self.run_allocation_cycle()
+            try:
+                # Poll simulation state every 3 seconds
+                is_running = get_simulation_running()
+                speed = get_simulation_speed()
+                target_days = get_simulation_days()
+                
+                # Log state changes
+                if is_running != last_running_state:
+                    if is_running:
+                        simulation_start_time = datetime.now(timezone.utc)
+                        logger.info(f"Simulation STARTED - Speed: {speed}x, Target: {target_days} days")
+                    else:
+                        logger.info("Simulation STOPPED")
+                    last_running_state = is_running
+                
+                # Check if simulation should be running
+                if not is_running:
+                    # Wait and continue polling
+                    await asyncio.sleep(SIMULATION_STATE_POLL_INTERVAL)
+                    continue
+                
+                # Check if we've exceeded target duration
+                if simulation_start_time and target_days > 0:
+                    elapsed = datetime.now(timezone.utc) - simulation_start_time
+                    elapsed_days = elapsed.total_seconds() / (24 * 3600)
+                    
+                    if elapsed_days >= target_days:
+                        logger.info(f"Simulation target duration ({target_days} days) reached. Stopping.")
+                        # Optionally auto-stop by updating state (requires write access)
+                        # For now, just log - user can stop from dashboard
+                        await asyncio.sleep(SIMULATION_STATE_POLL_INTERVAL)
+                        continue
+                
+                # Calculate adjusted cycle interval based on speed multiplier
+                # Base: 6 hours, at 100x speed: 216 seconds (3.6 minutes)
+                adjusted_interval = BASE_CYCLE_INTERVAL / speed
+                
+                # Ensure minimum interval of 1 second for safety
+                adjusted_interval = max(adjusted_interval, 1.0)
+                
+                # Wait for the adjusted interval (but check state periodically)
+                wait_start = datetime.now(timezone.utc)
+                while (datetime.now(timezone.utc) - wait_start).total_seconds() < adjusted_interval:
+                    if self._shutdown_event.is_set():
+                        break
+                    
+                    # Check state during wait (every 3 seconds)
+                    check_interval = min(SIMULATION_STATE_POLL_INTERVAL, 
+                                       adjusted_interval - (datetime.now(timezone.utc) - wait_start).total_seconds())
+                    if check_interval > 0:
+                        await asyncio.sleep(check_interval)
+                        
+                        # Re-check if still running
+                        if not get_simulation_running():
+                            logger.info("Simulation stopped during wait period")
+                            break
+                
+                # Run allocation cycle if still running and not shutdown
+                if not self._shutdown_event.is_set() and get_simulation_running():
+                    await self.run_allocation_cycle()
+                
+            except Exception as e:
+                logger.error(f"Error in overseer main loop: {e}", exc_info=True)
+                # Wait before retrying
+                await asyncio.sleep(SIMULATION_STATE_POLL_INTERVAL)
             
     async def run_allocation_cycle(self):
         """Run one allocation cycle."""

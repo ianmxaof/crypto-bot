@@ -10,6 +10,21 @@ from dotenv import load_dotenv
 env_path = Path(__file__).parent.parent / '.env'
 load_dotenv(env_path)
 
+# Import simulation state for runtime overrides
+try:
+    from config.simulation_state import (
+        get_simulation_running,
+        get_simulation_speed,
+        get_simulation_days,
+        get_starting_capital
+    )
+except ImportError:
+    # Fallback if simulation_state module isn't available
+    def get_simulation_running(): return False
+    def get_simulation_speed(): return 100.0
+    def get_simulation_days(): return 30
+    def get_starting_capital(): return 1000.0
+
 
 class Settings:
     """Application settings loaded from environment."""
@@ -62,6 +77,50 @@ class Settings:
     SIMULATION_MODE: bool = os.getenv("SIMULATION_MODE", "false").lower() == "true"
     SIMULATION_STARTING_BALANCE: Decimal = Decimal(os.getenv("SIMULATION_STARTING_BALANCE", "10000"))
     SIMULATION_FEES: Decimal = Decimal(os.getenv("SIMULATION_FEES", "0.001"))  # 0.1% per trade
+    
+    # Simulation Control (runtime state via dashboard)
+    # These read from simulation_state.json first (runtime override), then .env (defaults)
+    @property
+    def SIMULATION_RUNNING(self) -> bool:
+        """Check if simulation is currently running.
+        
+        Reads from data/simulation_state.json first (runtime override),
+        falls back to .env SIMULATION_RUNNING variable.
+        """
+        # Runtime state takes precedence
+        try:
+            return get_simulation_running()
+        except Exception:
+            # Fallback to .env
+            return os.getenv("SIMULATION_RUNNING", "false").lower() == "true"
+    
+    @property
+    def SIMULATION_SPEED(self) -> float:
+        """Get simulation speed multiplier.
+        
+        Reads from data/simulation_state.json first (runtime override),
+        falls back to .env SIMULATION_SPEED variable.
+        """
+        # Runtime state takes precedence
+        try:
+            return get_simulation_speed()
+        except Exception:
+            # Fallback to .env
+            return float(os.getenv("SIMULATION_SPEED", "100"))
+    
+    @property
+    def SIMULATION_DAYS(self) -> int:
+        """Get target simulation duration in days.
+        
+        Reads from data/simulation_state.json first (runtime override),
+        falls back to .env SIMULATION_DAYS variable.
+        """
+        # Runtime state takes precedence
+        try:
+            return get_simulation_days()
+        except Exception:
+            # Fallback to .env
+            return int(os.getenv("SIMULATION_DAYS", "30"))
     
     # Risk Controls
     MAX_POSITION_SIZE_USD: Decimal = Decimal(os.getenv("MAX_POSITION_SIZE_USD", "5000"))

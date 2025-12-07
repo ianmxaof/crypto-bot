@@ -1,15 +1,25 @@
-"""Simulation Controls dashboard page."""
+"""Simulation Controls dashboard page - Full command center for simulation control."""
 
 import streamlit as st
 from datetime import datetime, timezone
 import sys
 from pathlib import Path
+import shutil
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from dashboard.data_service import DashboardDataService
 from config.settings import settings
+from config.simulation_state import (
+    read_simulation_state,
+    write_simulation_state,
+    update_simulation_state,
+    get_simulation_running,
+    get_simulation_speed,
+    get_simulation_days,
+    get_starting_capital
+)
 
 # Page configuration
 st.set_page_config(
@@ -26,25 +36,189 @@ def get_data_service():
 
 data_service = get_data_service()
 
-st.title("🎮 Simulation Controls")
+st.title("🎮 Simulation Command Center")
+st.markdown("Control your entire swarm simulation from here — no terminal needed.")
 
-st.info("💡 Simulation controls will be available when integrated with the main bot process")
+# Read current state
+current_state = read_simulation_state()
 
-# Simulation status
-st.subheader("Simulation Status")
+# Sidebar controls
+with st.sidebar:
+    st.header("Simulation Parameters")
+    
+    # Speed control
+    speed = st.slider(
+        "Speed Multiplier",
+        1,
+        1000,
+        int(current_state.get("speed", 100)),
+        help="How many times faster than real-time. 100x = 6 hours = 3.6 minutes"
+    )
+    
+    # Days control
+    days = st.slider(
+        "Days to Simulate",
+        1,
+        365,
+        int(current_state.get("days", 30)),
+        help="Target duration for the simulation"
+    )
+    
+    # Capital control
+    capital = st.number_input(
+        "Starting Capital ($)",
+        100,
+        100000,
+        int(current_state.get("starting_capital", 1000)),
+        step=100,
+        help="Initial capital for the simulation"
+    )
+    
+    if st.button("Apply Settings", type="primary", use_container_width=True):
+        success = update_simulation_state(
+            speed=float(speed),
+            days=int(days),
+            starting_capital=float(capital)
+        )
+        if success:
+            st.success(f"Settings saved! Speed: {speed}x | Days: {days} | Capital: ${capital}")
+            st.rerun()
+        else:
+            st.error("Failed to save settings. Check logs for details.")
+
+# Main controls
+st.subheader("Simulation Controls")
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    if st.button("▶️ START SIMULATION", type="primary", use_container_width=True):
+        success = update_simulation_state(running=True)
+        if success:
+            st.balloons()
+            current_state = read_simulation_state()
+            st.success(f"Simulation STARTED: {current_state.get('days', 30)} days at {current_state.get('speed', 100)}x speed")
+            st.info("Watch the Overview tab — PnL will start climbing in seconds")
+            st.rerun()
+        else:
+            st.error("Failed to start simulation")
+
+with col2:
+    if st.button("⏹️ STOP SIMULATION", use_container_width=True):
+        success = update_simulation_state(running=False)
+        if success:
+            st.error("Simulation STOPPED")
+            st.rerun()
+        else:
+            st.error("Failed to stop simulation")
+
+with col3:
+    if st.button("🔄 RESET & CLEAR DATA", type="secondary", use_container_width=True):
+        confirm = st.checkbox("I understand this deletes all simulation history", key="confirm_reset")
+        if confirm:
+            try:
+                # Clear memory directory
+                memory_dir = Path(settings.MEMORY_DIR)
+                if memory_dir.exists():
+                    shutil.rmtree(memory_dir, ignore_errors=True)
+                    memory_dir.mkdir(parents=True, exist_ok=True)
+                
+                # Reset simulation state
+                update_simulation_state(running=False)
+                
+                st.success("Memory wiped — fresh start!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error resetting: {e}")
+
+# Live status
+st.divider()
+st.subheader("Live Simulation Status")
+
+# Read fresh state for display
+current_state = read_simulation_state()
+is_running = current_state.get("running", False)
+
+if is_running:
+    st.success("🟢 SIMULATION IS RUNNING")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Speed", f"{current_state.get('speed', 100)}x real-time")
+    with col2:
+        st.metric("Target Duration", f"{current_state.get('days', 30)} days")
+    with col3:
+        st.metric("Starting Capital", f"${current_state.get('starting_capital', 1000):,.2f}")
+else:
+    st.warning("⏸️ Simulation is stopped")
+
+# Quick actions
+st.divider()
+st.subheader("Quick Simulation Presets")
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    if st.button("⚡ Run 7-Day Blitz", use_container_width=True):
+        success = update_simulation_state(
+            days=7,
+            speed=500,
+            running=True
+        )
+        if success:
+            st.success("7-day blitz started at 500x!")
+            st.rerun()
+        else:
+            st.error("Failed to start blitz")
+
+with col2:
+    if st.button("🔥 Run 90-Day Stress Test", use_container_width=True):
+        success = update_simulation_state(
+            days=90,
+            speed=200,
+            running=True
+        )
+        if success:
+            st.success("90-day stress test running!")
+            st.rerun()
+        else:
+            st.error("Failed to start stress test")
+
+with col3:
+    if st.button("🏃 Run 1-Year Marathon", use_container_width=True):
+        success = update_simulation_state(
+            days=365,
+            speed=100,
+            running=True
+        )
+        if success:
+            st.success("1-year simulation started!")
+            st.rerun()
+        else:
+            st.error("Failed to start marathon")
+
+st.info("💡 Your bot reads these settings live — no restart needed! Changes take effect within 3-5 seconds.")
+
+# System information
+st.divider()
+st.subheader("System Information")
+
 col1, col2 = st.columns(2)
 
 with col1:
     mode = "🟢 Paper Trading" if settings.PAPER_TRADING else "🔴 Live Trading"
     st.write(f"**Current Mode:** {mode}")
-    st.write(f"**Starting Balance:** ${settings.SIMULATION_STARTING_BALANCE:,.2f}")
     st.write(f"**Fee Rate:** {settings.SIMULATION_FEES * 100:.3f}%")
+    st.write(f"**Memory Directory:** {settings.MEMORY_DIR}")
 
 with col2:
-    st.write(f"**Memory Directory:** {settings.MEMORY_DIR}")
     st.write(f"**Log Level:** {settings.LOG_LEVEL}")
+    last_updated = current_state.get("last_updated")
+    if last_updated:
+        st.write(f"**Last Updated:** {last_updated}")
+    else:
+        st.write("**Last Updated:** Never")
 
 # Data export
+st.divider()
 st.subheader("Data Export")
 pnl_df = data_service.get_pnl_data(limit=10000)
 
@@ -56,11 +230,13 @@ if not pnl_df.empty:
         file_name=f"pnl_data_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv",
         mime="text/csv"
     )
+else:
+    st.info("No PnL data available yet. Start a simulation to generate data.")
 
-# Clear data
+# Clear cache
+st.divider()
 st.subheader("Data Management")
-if st.button("🗑️ Clear Cache", help="Clear dashboard cache (does not delete stored data)"):
+if st.button("🗑️ Clear Dashboard Cache", help="Clear dashboard cache (does not delete stored data)"):
     data_service.clear_cache()
     st.success("Cache cleared!")
     st.rerun()
-
