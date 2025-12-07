@@ -196,6 +196,13 @@ class SwarmCouncilV3(Agent):
                 await self.process_proposal(proposal)
             except Exception as e:
                 logger.error(f"Error processing proposal: {e}", exc_info=True)
+        
+        # Subscribe to marketplace agent uploads
+        async for event in event_bus.subscribe_async("marketplace:agent_uploaded"):
+            try:
+                await self.evaluate_marketplace_agent(event.data)
+            except Exception as e:
+                logger.error(f"Error evaluating marketplace agent: {e}", exc_info=True)
                 
     async def process_proposal(self, proposal: StrategyProposal):
         """Process a new strategy proposal.
@@ -302,6 +309,57 @@ class {class_name}Agent(Agent):
         logger.critical(f"NEW AGENT BIRTHED → {class_name}Agent")
         logger.debug(f"Generated code:\n{code}")
         
+    async def evaluate_marketplace_agent(self, agent_data: Dict):
+        """Evaluate an uploaded marketplace agent.
+        
+        Args:
+            agent_data: Dictionary with agent_id and other metadata
+        """
+        agent_id = agent_data.get("agent_id")
+        if not agent_id:
+            logger.warning("Marketplace agent event missing agent_id")
+            return
+        
+        try:
+            from agents.marketplace import get_marketplace
+            marketplace = get_marketplace()
+            agent = marketplace.get_agent(agent_id)
+            
+            if not agent:
+                logger.warning(f"Marketplace agent {agent_id} not found")
+                return
+            
+            logger.info(f"Council evaluating marketplace agent: {agent.name} by {agent.author}")
+            
+            # Create a proposal-like object from the agent
+            proposal = StrategyProposal(
+                id=agent_id,
+                author=agent.author,
+                name=agent.name,
+                description=agent.description,
+                expected_sharpe=agent.sharpe,
+                expected_apr=agent.apr,
+                max_drawdown=agent.max_drawdown,
+                code_template=agent.code,
+                capital_request_usd=10000.0,  # Default capital request
+                timestamp=agent.upload_date
+            )
+            
+            # Process through normal council voting
+            await self.process_proposal(proposal)
+            
+            # Update agent status based on council decision
+            # (This would be set in process_proposal based on vote result)
+            # For now, we'll publish the evaluation result
+            event_bus.publish("marketplace:agent_evaluated", {
+                "agent_id": agent_id,
+                "proposal_id": proposal.id,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }, source=self.config.name)
+            
+        except Exception as e:
+            logger.error(f"Error evaluating marketplace agent {agent_id}: {e}", exc_info=True)
+    
     async def on_stop(self):
         """Cleanup on stop."""
         await self.inventor.stop()

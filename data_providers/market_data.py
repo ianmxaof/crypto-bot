@@ -6,14 +6,20 @@ historical OHLCV data and live price feeds.
 
 import logging
 import asyncio
+import json
 from typing import Dict, List, Optional, Any, Callable
 from decimal import Decimal
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass
+from pathlib import Path
 import aiohttp
 import time
 
 logger = logging.getLogger(__name__)
+
+# Cache directory for historical data
+CACHE_DIR = Path(__file__).parent.parent / "data" / "historical_cache"
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 # CoinGecko API endpoints
 COINGECKO_API_BASE = "https://api.coingecko.com/api/v3"
@@ -44,6 +50,7 @@ class MarketDataProvider:
         self._session: Optional[aiohttp.ClientSession] = None
         self._cache: Dict[str, Any] = {}
         self._cache_ttl = timedelta(minutes=5)  # Cache prices for 5 minutes
+        self._historical_cache: Dict[str, List[Candle]] = {}  # Cache for historical data
         self._last_call_time = 0.0
         self._min_call_interval = 0.1  # Rate limiting: 100ms between calls
         
@@ -219,6 +226,134 @@ class MarketDataProvider:
                     
         except Exception as e:
             logger.error(f"Error fetching historical OHLCV for {symbol}: {e}")
+            return []
+    
+    async def get_historical_ohlcv_range(
+        self,
+        symbol: str,
+        start_date: datetime,
+        end_date: datetime,
+        interval: str = "1d"
+    ) -> List[Candle]:
+        """Get historical OHLCV data for a specific date range with file-based caching.
+        
+        Uses CoinGecko's /market_chart/range endpoint which is more efficient for date ranges.
+        Implements file-based caching to avoid rate limits.
+        
+        Args:
+            symbol: Trading symbol (e.g., "BTC/USDT")
+            start_date: Start date (datetime with timezone)
+            end_date: End date (datetime with timezone)
+            interval: Candle interval ("1h", "4h", "1d") - Note: CoinGecko returns daily data
+            
+        Returns:
+            List of Candle objects within the date range, sorted by timestamp
+        """
+        # Normalize timezones
+        if start_date.tzinfo is None:
+            start_date = start_date.replace(tzinfo=timezone.utc)
+        if end_date.tzinfo is None:
+            end_date = end_date.replace(tzinfo=timezone.utc)
+        
+        # Create cache file path
+        coin_id = self._normalize_symbol(symbol)
+        cache_file = CACHE_DIR / f"{coin_id}_{start_date.date()}_{end_date.date()}.json"
+        
+        # Check file cache first
+        if cache_file.exists():
+            try:
+                logger.info(f"Cache hit for {symbol} ({start_date.date()} to {end_date.date()})")
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    cached_data = json.load(f)
+                
+                candles = []
+                for item in cached_data.get('prices', []):
+                    timestamp_ms = item[0]
+                    price = Decimal(str(item[1]))
+                    timestamp = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+                    
+                    # Filter by date range
+                    if start_date <= timestamp <= end_date:
+                        candles.append(Candle(
+                            timestamp=timestamp,
+                            open=price,
+                            high=price,  # Market chart doesn't have OHLC, use price for all
+                            low=price,
+                            close=price,
+                            volume=Decimal('0')
+                        ))
+                
+                if candles:
+                    logger.info(f"Loaded {len(candles)} candles from cache")
+                    return candles
+            except Exception as e:
+                logger.warning(f"Error reading cache file: {e}, fetching fresh data")
+        
+        # Fetch from CoinGecko using market_chart/range endpoint (more efficient)
+        try:
+            await self._rate_limit()
+            coin_id = self._normalize_symbol(symbol)
+            
+            # Convert dates to unix timestamps
+            start_ts = int(start_date.timestamp())
+            end_ts = int(end_date.timestamp())
+            
+            session = await self._get_session()
+            url = f"{COINGECKO_API_BASE}/coins/{coin_id}/market_chart/range"
+            params = {
+                "vs_currency": "usd",
+                "from": str(start_ts),
+                "to": str(end_ts)
+            }
+            
+            logger.info(f"Fetching historical data for {symbol} ({start_date.date()} to {end_date.date()})...")
+            
+            async with session.get(url, params=params) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    
+                    # Respect rate limit - 2 second delay (30 calls/min)
+                    await asyncio.sleep(2)
+                    
+                    candles = []
+                    prices = data.get('prices', [])
+                    
+                    for item in prices:
+                        timestamp_ms = item[0]
+                        price = Decimal(str(item[1]))
+                        timestamp = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+                        
+                        # Filter by date range
+                        if start_date <= timestamp <= end_date:
+                            candles.append(Candle(
+                                timestamp=timestamp,
+                                open=price,
+                                high=price,  # Market chart only has price, use for all OHLC
+                                low=price,
+                                close=price,
+                                volume=Decimal('0')
+                            ))
+                    
+                    # Sort by timestamp
+                    candles.sort(key=lambda x: x.timestamp)
+                    
+                    # Save to cache
+                    try:
+                        with open(cache_file, 'w', encoding='utf-8') as f:
+                            json.dump(data, f, indent=2)
+                        logger.info(f"Cached {symbol} data to {cache_file}")
+                    except Exception as e:
+                        logger.warning(f"Failed to cache data: {e}")
+                    
+                    logger.info(f"Fetched {len(candles)} candles for {symbol} from CoinGecko")
+                    return candles
+                else:
+                    error_text = await response.text()
+                    logger.warning(f"CoinGecko API error: {response.status} - {error_text}")
+                    return []
+                    
+        except Exception as e:
+            logger.error(f"Error fetching historical OHLCV for {symbol}: {e}", exc_info=True)
             return []
     
     async def subscribe_live_price(
