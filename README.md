@@ -31,7 +31,32 @@ cd crypto_bot
 cp .env.example .env
 ```
 
-### 2. Configure Environment
+### 2. Set Up Virtual Environment (Recommended)
+
+**Windows (PowerShell):**
+```powershell
+.\setup_venv.ps1
+.\activate.ps1
+```
+
+**Linux/Mac:**
+```bash
+chmod +x setup_venv.sh activate.sh
+./setup_venv.sh
+source activate.sh
+```
+
+**Manual Setup:**
+```bash
+python -m venv .venv
+# Windows: .\.venv\Scripts\Activate.ps1
+# Linux/Mac: source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+See [VENV_SETUP.md](VENV_SETUP.md) for detailed instructions.
+
+### 3. Configure Environment
 
 Edit `.env` and set at least one exchange API key:
 
@@ -40,12 +65,13 @@ BYBIT_API_KEY=your_key
 BYBIT_API_SECRET=your_secret
 HELIUS_API_KEY=your_helius_key  # For MEV hunting
 STARTING_CAPITAL=1000
+PAPER_TRADING=true  # Keep this true for safety!
 ```
 
-### 3. Install Dependencies
+### 4. Verify Installation
 
 ```bash
-pip install -r requirements.txt
+python scripts/verify_env.py
 ```
 
 ### 4. Run with Docker (Recommended)
