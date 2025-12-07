@@ -14,18 +14,29 @@ from simulation.atomic_balance import AtomicBalanceManager
 
 logger = logging.getLogger(__name__)
 
+# Optional market data provider integration
+try:
+    from data_providers.market_data import get_market_data_provider, MarketDataProvider
+    MARKET_DATA_AVAILABLE = True
+except ImportError:
+    MARKET_DATA_AVAILABLE = False
+    MarketDataProvider = None
+
 
 class MockExchange(BaseExchange):
     """Mock exchange for paper trading - simulates all operations without real API calls."""
     
     def __init__(self, starting_balance: Decimal = Decimal('10000'),
-                 fee_rate: Decimal = Decimal('0.001'), name: str = "mock"):
+                 fee_rate: Decimal = Decimal('0.001'), name: str = "mock",
+                 use_real_data: bool = False, real_data_mode: str = "live"):
         """Initialize mock exchange.
         
         Args:
             starting_balance: Starting USDT balance
             fee_rate: Trading fee rate (0.001 = 0.1%)
             name: Exchange name identifier
+            use_real_data: If True, fetch real market data instead of static prices
+            real_data_mode: "live" for current prices, "historical" for replay mode
         """
         # Use dummy credentials for mock
         super().__init__(api_key="mock_key", api_secret="mock_secret", testnet=True)
@@ -41,6 +52,21 @@ class MockExchange(BaseExchange):
         
         # Track orders by client order ID for idempotent submission
         self._client_order_map: Dict[str, Order] = {}
+        
+        # Market data integration
+        self.use_real_data = use_real_data and MARKET_DATA_AVAILABLE
+        self.real_data_mode = real_data_mode
+        self.market_data_provider: Optional[MarketDataProvider] = None
+        self.historical_candles: Dict[str, List] = {}
+        self.historical_candle_index: Dict[str, int] = {}
+        
+        if self.use_real_data:
+            try:
+                self.market_data_provider = get_market_data_provider()
+                logger.info(f"MockExchange initialized with REAL market data (mode: {real_data_mode})")
+            except Exception as e:
+                logger.warning(f"Failed to initialize market data provider: {e}. Using static prices.")
+                self.use_real_data = False
         
         # Default prices (can be updated with real market data)
         self.state.current_prices = {
@@ -321,6 +347,66 @@ class MockExchange(BaseExchange):
             price: New price
         """
         self.state.update_price(symbol, price)
+    
+    async def update_prices_from_real_data(self):
+        """Update prices from real market data provider (if enabled).
+        
+        Call this periodically during simulation to use live prices.
+        """
+        if not self.use_real_data or not self.market_data_provider:
+            return
+        
+        try:
+            for symbol in self.state.current_prices.keys():
+                price = await self.market_data_provider.get_current_price(symbol)
+                if price:
+                    self.state.update_price(symbol, price)
+                    logger.debug(f"Updated {symbol} price to ${price}")
+        except Exception as e:
+            logger.warning(f"Error updating prices from real data: {e}")
+    
+    async def load_historical_data(self, symbol: str, days: int = 30):
+        """Load historical market data for replay mode.
+        
+        Args:
+            symbol: Trading symbol
+            days: Number of days of history to load
+        """
+        if not self.use_real_data or not self.market_data_provider:
+            return
+        
+        try:
+            candles = await self.market_data_provider.get_historical_ohlcv(symbol, days=days)
+            if candles:
+                self.historical_candles[symbol] = candles
+                self.historical_candle_index[symbol] = 0
+                logger.info(f"Loaded {len(candles)} historical candles for {symbol}")
+        except Exception as e:
+            logger.error(f"Error loading historical data for {symbol}: {e}")
+    
+    def get_next_historical_price(self, symbol: str) -> Optional[Decimal]:
+        """Get next price from historical data (for replay mode).
+        
+        Args:
+            symbol: Trading symbol
+            
+        Returns:
+            Next price from historical data, or None if no more data
+        """
+        if symbol not in self.historical_candles:
+            return None
+        
+        candles = self.historical_candles[symbol]
+        index = self.historical_candle_index.get(symbol, 0)
+        
+        if index >= len(candles):
+            return None
+        
+        candle = candles[index]
+        self.historical_candle_index[symbol] = index + 1
+        
+        # Use close price from candle
+        return candle.close
         
     def get_total_value(self) -> Decimal:
         """Get total portfolio value.

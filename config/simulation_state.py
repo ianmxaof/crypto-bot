@@ -27,7 +27,12 @@ DEFAULT_STATE = {
     "speed": 100,
     "days": 30,
     "starting_capital": 1000,
-    "last_updated": None
+    "last_updated": None,
+    "start_time": None,  # When simulation started
+    "elapsed_real_seconds": 0.0,  # Real-time elapsed
+    "elapsed_sim_days": 0.0,  # Simulated days elapsed
+    "cycle_count": 0,  # Number of cycles completed
+    "current_phase": "idle"  # idle, initializing, allocating, running, complete
 }
 
 
@@ -227,7 +232,7 @@ def update_simulation_state(**kwargs) -> bool:
     """Update multiple simulation state values at once.
     
     Args:
-        **kwargs: Key-value pairs to update (running, speed, days, starting_capital)
+        **kwargs: Key-value pairs to update (running, speed, days, starting_capital, etc.)
         
     Returns:
         True if successful
@@ -235,7 +240,8 @@ def update_simulation_state(**kwargs) -> bool:
     state = read_simulation_state()
     
     # Validate and update allowed keys only
-    allowed_keys = {"running", "speed", "days", "starting_capital"}
+    allowed_keys = {"running", "speed", "days", "starting_capital", "start_time", 
+                   "elapsed_real_seconds", "elapsed_sim_days", "cycle_count", "current_phase"}
     for key, value in kwargs.items():
         if key in allowed_keys:
             if key == "speed" and value <= 0:
@@ -252,4 +258,74 @@ def update_simulation_state(**kwargs) -> bool:
             logger.warning(f"Ignoring unknown state key: {key}")
     
     return write_simulation_state(state)
+
+
+def get_progress_percentage() -> float:
+    """Get simulation progress as percentage.
+    
+    Returns:
+        Progress percentage (0-100)
+    """
+    state = read_simulation_state()
+    target_days = state.get("days", 30)
+    elapsed_sim_days = state.get("elapsed_sim_days", 0.0)
+    
+    if target_days <= 0:
+        return 0.0
+    
+    progress = (elapsed_sim_days / target_days) * 100
+    return min(100.0, max(0.0, progress))
+
+
+def get_elapsed_sim_days() -> float:
+    """Get elapsed simulation days.
+    
+    Returns:
+        Elapsed simulated days
+    """
+    state = read_simulation_state()
+    return float(state.get("elapsed_sim_days", 0.0))
+
+
+def get_cycle_count() -> int:
+    """Get number of completed cycles.
+    
+    Returns:
+        Cycle count
+    """
+    state = read_simulation_state()
+    return int(state.get("cycle_count", 0))
+
+
+def get_current_phase() -> str:
+    """Get current simulation phase.
+    
+    Returns:
+        Current phase string
+    """
+    state = read_simulation_state()
+    return state.get("current_phase", "idle")
+
+
+def set_current_phase(phase: str) -> bool:
+    """Set current simulation phase.
+    
+    Args:
+        phase: Phase string (idle, initializing, allocating, running, complete)
+        
+    Returns:
+        True if successful
+    """
+    return update_simulation_state(current_phase=phase)
+
+
+def increment_cycle_count() -> bool:
+    """Increment cycle count by 1.
+    
+    Returns:
+        True if successful
+    """
+    state = read_simulation_state()
+    current_count = state.get("cycle_count", 0)
+    return update_simulation_state(cycle_count=current_count + 1)
 

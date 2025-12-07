@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from core.agent_base import Agent, AgentConfig
 from core.event_bus import event_bus
 from core.memory.chrono import ChronologicalMemory
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -110,8 +111,14 @@ class CryptoSwarmOverseer(Agent):
         ))
         self.strategies: List[StrategyAgent] = []
         self.total_capital = starting_capital
+        self.starting_capital = starting_capital  # Track for PnL calculation
         self.risk_appetite = Decimal('0.95')  # 95% deployed max
-        self.memory = ChronologicalMemory(namespace="crypto_pnl")
+        # Initialize memory with persist path for dashboard access
+        self.memory = ChronologicalMemory(
+            namespace="crypto_pnl",
+            persist_path=settings.MEMORY_DIR / "crypto_pnl.json"
+        )
+        self.last_logged_balance = starting_capital  # Track for PnL delta calculation
         
     def register_strategy(self, strategy: StrategyAgent):
         """Register a strategy agent.
@@ -257,15 +264,34 @@ class CryptoSwarmOverseer(Agent):
                 except Exception as e:
                     logger.error(f"Failed to execute {agent.config.name}: {e}")
                     
-            # Record cycle
+            # Calculate PnL (change since last log)
+            current_balance = float(self.total_capital)
+            pnl_delta = current_balance - float(self.last_logged_balance)
+            
+            # Calculate drawdown (simplified - would need peak tracking in real implementation)
+            peak = max(float(self.starting_capital), current_balance)
+            drawdown = ((peak - current_balance) / peak * 100) if peak > 0 else 0.0
+            
+            # Record cycle with comprehensive logging for dashboard
             self.memory.append({
-                "cycle": datetime.now(timezone.utc).isoformat(),
-                "total_capital": float(self.total_capital),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "pnl": pnl_delta,
+                "balance": current_balance,
+                "agent": self.config.name,
+                "symbol": "SIM",  # Simulation cycle
+                "side": "N/A",
+                "amount": float(allocated),
+                "price": 0.0,
+                "drawdown": drawdown,
+                "total_capital": current_balance,
                 "deployed": float(allocated),
                 "top_strategy_yields": [float(y) for y, _ in bids[:3]]
             })
             
-            logger.info(f"Cycle complete — Deployed {allocated:.2f} / {deployable:.2f} USDT")
+            # Update last logged balance for next cycle
+            self.last_logged_balance = self.total_capital
+            
+            logger.info(f"Cycle complete — Deployed {allocated:.2f} / {deployable:.2f} USDT | Balance: ${current_balance:,.2f} | PnL: ${pnl_delta:+,.2f}")
             
         except Exception as e:
             logger.error(f"Error in allocation cycle: {e}", exc_info=True)

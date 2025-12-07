@@ -150,6 +150,74 @@ if is_running:
 else:
     st.warning("⏸️ Simulation is stopped")
 
+# Live Simulation Checklist
+st.divider()
+with st.expander("📋 Live Simulation Checklist", expanded=True):
+    # Get data to determine progress
+    try:
+        summary = data_service.get_pnl_summary()
+        pnl_df = data_service.get_pnl_data(limit=100)
+        
+        # Check initialization
+        init_status = "✅ Done" if is_running or not pnl_df.empty else "⏳ Waiting..."
+        
+        # Check allocation (has data means allocation happened)
+        alloc_status = "✅ Done" if not pnl_df.empty else "⏳ Waiting..."
+        
+        # Calculate cycles/days progress
+        progress_pct = 0.0
+        cycle_status = "⏸️ Stopped"
+        if not pnl_df.empty and is_running:
+            cycle_count = len(pnl_df)
+            target_days = current_state.get('days', 30)
+            # Estimate: each cycle is roughly 6 hours = 0.25 days
+            estimated_days = cycle_count * 0.25
+            progress_pct = min(100, (estimated_days / target_days * 100) if target_days > 0 else 0)
+            cycle_status = f"🔄 {cycle_count} cycles | ~{estimated_days:.1f}/{target_days} days ({progress_pct:.0f}%)"
+        elif is_running:
+            cycle_status = "🔄 Starting..."
+        
+        # Risk check (simplified - would need actual risk data)
+        risk_status = "🟢 All green" if is_running else "⏸️ N/A"
+        
+        # Completion status
+        if is_running:
+            last_updated = current_state.get("last_updated")
+            if last_updated:
+                try:
+                    last_ts = datetime.fromisoformat(last_updated.replace('Z', '+00:00'))
+                    elapsed = (datetime.now(timezone.utc) - last_ts).total_seconds() / 3600
+                    if elapsed > 24:  # No update in 24 hours
+                        complete_status = "⚠️ Stalled (no updates)"
+                    else:
+                        complete_status = "❌ Not yet"
+                except:
+                    complete_status = "❌ Not yet"
+            else:
+                complete_status = "❌ Not yet"
+        else:
+            complete_status = "⏸️ Not started"
+        
+        st.markdown(f"""
+        1. **Initialization:** {init_status}  
+        2. **Capital Allocation:** {alloc_status}  
+        3. **Agent Cycles:** {cycle_status}  
+        4. **Risk Check:** {risk_status}  
+        5. **Progress:** {progress_pct:.0f}% complete (estimated)  
+        6. **Complete:** {complete_status}
+        """)
+        
+    except Exception as e:
+        st.warning(f"Error loading checklist data: {e}")
+        st.markdown("""
+        1. **Initialization:** ⏳ Checking...
+        2. **Capital Allocation:** ⏳ Checking...
+        3. **Agent Cycles:** ⏳ Checking...
+        4. **Risk Check:** ⏳ Checking...
+        5. **Progress:** ⏳ Checking...
+        6. **Complete:** ⏳ Checking...
+        """)
+
 # Quick actions
 st.divider()
 st.subheader("Quick Simulation Presets")

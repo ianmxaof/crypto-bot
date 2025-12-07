@@ -11,6 +11,14 @@ import pandas as pd
 from core.memory.chrono import ChronologicalMemory
 from monitoring.metrics_collector import MetricsCollector
 from config.settings import settings
+from dashboard.utils import to_float
+from config.simulation_state import (
+    get_progress_percentage,
+    get_elapsed_sim_days,
+    get_cycle_count,
+    get_current_phase,
+    read_simulation_state
+)
 
 logger = logging.getLogger(__name__)
 
@@ -125,12 +133,12 @@ class DashboardDataService:
             
             # Current balance
             if 'balance' in df.columns:
-                summary['current_balance'] = float(df['balance'].iloc[-1])
+                summary['current_balance'] = to_float(df['balance'].iloc[-1])
             else:
-                summary['current_balance'] = float(settings.SIMULATION_STARTING_BALANCE)
+                summary['current_balance'] = to_float(settings.SIMULATION_STARTING_BALANCE)
         else:
             summary['max_drawdown_pct'] = 0.0
-            summary['current_balance'] = float(settings.SIMULATION_STARTING_BALANCE)
+            summary['current_balance'] = to_float(settings.SIMULATION_STARTING_BALANCE)
         
         self._set_cache(cache_key, summary)
         return summary
@@ -287,9 +295,9 @@ class DashboardDataService:
         df = self.get_pnl_data(limit=1000)
         
         metrics = {
-            'max_position_size_usd': float(settings.MAX_POSITION_SIZE_USD),
-            'max_daily_loss_percent': float(settings.MAX_DAILY_LOSS_PERCENT),
-            'max_daily_loss_usd': float(settings.MAX_DAILY_LOSS_USD),
+            'max_position_size_usd': to_float(settings.MAX_POSITION_SIZE_USD),
+            'max_daily_loss_percent': to_float(settings.MAX_DAILY_LOSS_PERCENT),
+            'max_daily_loss_usd': to_float(settings.MAX_DAILY_LOSS_USD),
         }
         
         if not df.empty and 'balance' in df.columns:
@@ -316,11 +324,39 @@ class DashboardDataService:
         else:
             metrics['current_drawdown_pct'] = 0.0
             metrics['max_drawdown_pct'] = 0.0
-            metrics['current_balance'] = float(settings.SIMULATION_STARTING_BALANCE)
+            metrics['current_balance'] = to_float(settings.SIMULATION_STARTING_BALANCE)
             metrics['daily_pnl'] = 0.0
         
         self._set_cache(cache_key, metrics)
         return metrics
+    
+    def get_simulation_progress(self) -> Dict[str, Any]:
+        """Get simulation progress information.
+        
+        Returns:
+            Dictionary with progress metrics
+        """
+        cache_key = "simulation_progress"
+        cached = self._get_cached(cache_key)
+        if cached is not None:
+            return cached
+        
+        state = read_simulation_state()
+        
+        progress = {
+            'is_running': state.get('running', False),
+            'progress_pct': get_progress_percentage(),
+            'elapsed_sim_days': get_elapsed_sim_days(),
+            'target_days': state.get('days', 30),
+            'cycle_count': get_cycle_count(),
+            'current_phase': get_current_phase(),
+            'speed': state.get('speed', 100),
+            'start_time': state.get('start_time'),
+            'elapsed_real_seconds': state.get('elapsed_real_seconds', 0.0)
+        }
+        
+        self._set_cache(cache_key, progress)
+        return progress
     
     def clear_cache(self):
         """Clear all cached data."""

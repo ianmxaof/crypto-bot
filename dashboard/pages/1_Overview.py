@@ -12,6 +12,7 @@ from dashboard.components import (
     plot_pnl_curve, plot_balance_history, metric_card
 )
 from dashboard.config import MAX_DATA_POINTS
+from dashboard.utils import to_float, safe_calculate_return, safe_format_currency
 from config.settings import settings
 
 # Page configuration
@@ -34,17 +35,39 @@ data_limit = st.session_state.get('data_limit', MAX_DATA_POINTS)
 
 st.title("📊 Overview Dashboard")
 
-# Get summary data
-summary = data_service.get_pnl_summary()
-pnl_df = data_service.get_pnl_data(limit=data_limit)
-balance_df = data_service.get_balance_history(limit=data_limit)
+# Get summary data with error handling
+try:
+    summary = data_service.get_pnl_summary()
+except Exception as e:
+    import logging
+    logging.getLogger(__name__).error(f"Error fetching PnL summary: {e}", exc_info=True)
+    summary = {}
+    st.error(f"Error loading summary data: {e}")
+
+try:
+    pnl_df = data_service.get_pnl_data(limit=data_limit)
+except Exception as e:
+    import logging
+    import pandas as pd
+    logging.getLogger(__name__).error(f"Error fetching PnL data: {e}", exc_info=True)
+    pnl_df = pd.DataFrame(columns=['timestamp', 'pnl', 'agent', 'balance', 'cumulative_pnl'])
+    st.error(f"Error loading PnL data: {e}")
+
+try:
+    balance_df = data_service.get_balance_history(limit=data_limit)
+except Exception as e:
+    import logging
+    import pandas as pd
+    logging.getLogger(__name__).error(f"Error fetching balance history: {e}", exc_info=True)
+    balance_df = pd.DataFrame(columns=['timestamp', 'balance', 'free', 'used'])
+    st.error(f"Error loading balance data: {e}")
 
 # Key metrics row
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
     current_balance = summary.get('current_balance', settings.SIMULATION_STARTING_BALANCE)
-    metric_card("Current Balance", f"${current_balance:,.2f}")
+    metric_card("Current Balance", safe_format_currency(current_balance))
 
 with col2:
     total_pnl = summary.get('total_pnl', 0.0)
@@ -79,14 +102,24 @@ with status_col3:
 
 st.divider()
 
-# Charts
+# Charts with error handling
 col1, col2 = st.columns(2)
 
 with col1:
-    plot_pnl_curve(pnl_df, "Cumulative P&L Over Time")
+    try:
+        plot_pnl_curve(pnl_df, "Cumulative P&L Over Time")
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Error plotting PnL curve: {e}", exc_info=True)
+        st.error(f"Error displaying PnL chart: {e}")
 
 with col2:
-    plot_balance_history(balance_df, "Portfolio Balance")
+    try:
+        plot_balance_history(balance_df, "Portfolio Balance")
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Error plotting balance history: {e}", exc_info=True)
+        st.error(f"Error displaying balance chart: {e}")
 
 # Additional metrics
 st.subheader("Performance Metrics")
@@ -99,9 +132,13 @@ with metrics_col1:
     st.write(f"**Max Loss:** ${summary.get('max_loss', 0.0):,.2f}")
 
 with metrics_col2:
-    st.write(f"**Starting Capital:** ${settings.SIMULATION_STARTING_BALANCE:,.2f}")
-    if current_balance > 0:
-        return_pct = ((current_balance - settings.SIMULATION_STARTING_BALANCE) / settings.SIMULATION_STARTING_BALANCE) * 100
-        st.write(f"**Return:** {return_pct:.2f}%")
+    st.write(f"**Starting Capital:** {safe_format_currency(settings.SIMULATION_STARTING_BALANCE)}")
+    try:
+        current_float = to_float(current_balance)
+        if current_float > 0:
+            return_pct = safe_calculate_return(current_balance, settings.SIMULATION_STARTING_BALANCE)
+            st.write(f"**Return:** {return_pct:.2f}%")
+    except Exception as e:
+        st.warning(f"Error calculating return: {e}")
     st.write(f"**Realized P&L:** ${total_pnl:,.2f}")
 
